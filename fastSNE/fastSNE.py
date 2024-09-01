@@ -13,7 +13,7 @@ class fastSNE:
         self.random_state = random_state
         if self.random_state is not None and not self.random_state > 0:
             raise Exception("fastSNE: random_state must be a strictly positive integer")
-        # dataset info 
+        # dataset info 	8.9
         self.N   = None
         self.M   = None
         self.cpu_Xhd  = None
@@ -33,21 +33,19 @@ class fastSNE:
         self.dist_metric  = 0 # 0: euclidean, 1: cosine, 2: manhattan
 
     def fit(self, N, M, X, Y=None):
-        # store the dataset info
         self.N   = N
         self.M   = M
         self.cpu_Xhd  = X
         self.cuda_Xhd = gpuarray.to_gpu(self.cpu_Xhd)
-        # malloc things depending on N and M
+
         self.cpu_Xld         = (np.random.uniform(size=(N, self.n_components)).astype(np.float32) - 0.5) * 2.0
         self.cuda_Xld_true_A = gpuarray.to_gpu(self.cpu_Xld)
         self.cuda_Xld_true_B = gpuarray.to_gpu(self.cpu_Xld)
         self.cuda_Xld_nest   = gpuarray.to_gpu(self.cpu_Xld)
-        self.cuda_Xld_mmtm   = gpuarray.zeros(self.cpu_Xld.shape, self.cpu_Xld.dtype)
+        zeros_array = np.zeros(self.cpu_Xld.shape, self.cpu_Xld.dtype)
+        self.cuda_Xld_mmtm   = gpuarray.to_gpu(zeros_array)
         
-        1/0
         
-        # fit the model
         if self.with_GUI:
             self.fit_with_gui(Y)
         else:

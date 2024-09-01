@@ -42,7 +42,11 @@ def run_demo():
     # fetch the dataset
     N, M, X, Y = fetch_dataset()
 
-    # instanciate the class
+    """ import pycuda.autoinit
+    print("pycuda version: ", pycuda.VERSION)
+    import pycuda.gpuarray as gpuarray
+    a_gpu = gpuarray.to_gpu(np.random.randn(10,3).astype(np.float32)) """
+
     with_GUI = True 
     tsne = fastSNE.fastSNE(with_GUI, n_components=2, random_state=None)
     if with_GUI:
