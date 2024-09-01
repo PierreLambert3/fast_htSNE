@@ -55,21 +55,15 @@ class Shared_variables:
         self.shared_iterDone1   = multiprocessing.Value('i', 0)
         self.shared_iterDone1   = multiprocessing.Value('i', 0)
         self.shared_points_have_moved = multiprocessing.Value('b', True)
-        # numpy arrays
+        # on GPU
         self.cuda_Xld_A = cuda_Xld_A
         self.cuda_Xld_B = cuda_Xld_B
     
     def get_reading_Xld(self):
-        if self.ptr_isPhaseA.value:
-            return self.cuda_Xld_A
-        else:
-            return self.cuda_Xld_B
+        return self.cuda_Xld_A if self.shared_isPhaseA.value else self.cuda_Xld_B
     
     def get_writing_Xld(self):
-        if self.ptr_isPhaseA.value:
-            return self.cuda_Xld_B
-        else:
-            return self.cuda_Xld_A
+        return self.cuda_Xld_B if self.shared_isPhaseA.value else self.cuda_Xld_A
 
 class ModernGLWindow(pyglet.window.Window):
     def __init__(self, Y, shared_variables, N, Mld, **kwargs):
@@ -161,7 +155,7 @@ class FastSNE_gui:
         # Start the pyglet event loop
         pyglet.app.run()
 
-def gui_worker(Y, shared_variables, N, Mld, n_components):
+def gui_worker(cuda_Y, shared_variables, N, Mld, n_components):
     # create and launch the GUI (GUI = window + renderer + event loop)
     gui = FastSNE_gui(Y, shared_variables, N, Mld, window_w=800, window_h=600)
 
