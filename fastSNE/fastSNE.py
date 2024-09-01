@@ -5,37 +5,53 @@ import multiprocessing
 # import & init pycuda
 import pycuda.driver as cuda
 import pycuda.autoinit
+import pycuda.gpuarray as gpuarray
 
 __MAX_PP__ = 80
 __MAX_K__  = __MAX_PP__ * 3
 
 class fastSNE:
     def __init__(self, with_GUI, n_components=2, random_state=None):
+        # state variables
         self.with_GUI     = with_GUI
         self.is_fitted    = False
         self.random_state = random_state
         if self.random_state is not None and not self.random_state > 0:
             raise Exception("fastSNE: random_state must be a strictly positive integer")
-        self.N        = None
-        self.Mhd      = None
-        self.cpu_Xhd  = None
-        self.Mld      = np.uint32(n_components)
+        # dataset and hyperparameters
+        self.N            = None
+        self.Mhd          = None
+        self.Mld          = np.uint32(n_components)
         self.kern_alpha   = np.float32(1.0)
         self.perplexity   = np.float32(5.0)
         self.dist_metric  = 0
-
-        self.shared_buffer = None # for GUI
-
+        # result
+        self.cpu_Xld  = None
+        # variables allocated on the device
+        self.cuda_Xhd        = None
+        self.cuda_Xld_true_A = None # read by the GUI
+        self.cuda_Xld_true_B = None # read by the GUI
+        self.cuda_Xld_nest   = None
+        self.cuda_Xld_mmtm   = None
+        # cuda streams
+        self.stream_neigh_HD = cuda.Stream()
+        self.stream_neigh_LD = cuda.Stream()
+        self.stream_grads    = cuda.Stream()
     
-    def fit(self, N, M, X, Y=None):
-        self.N   = N
-        self.M   = M
-        self.cpu_Xhd  = X
+    def fit(self, N, M, Xhd, Y=None):
+        self.N        = N
+        self.M        = M
+        self.cpu_Xld  = (np.random.uniform(size=(N, self.Mld)).astype(np.float32) - 0.5) * 2.0
+        cuda_Xhd = gpuarray.to_gpu_async(Xhd)
+        cuda_Xld_true_A = gpuarray.to_gpu(self.cpu_Xld)
+        cuda_Xld_true_B = gpuarray.to_gpu(self.cpu_Xld)
+        cuda_Xld_nest   = gpuarray.to_gpu(self.cpu_Xld)
+        cuda_Xld_mmtm   = gpuarray.to_gpu(np.zeros(self.cpu_Xld.shape, self.cpu_Xld.dtype))
         
         if self.with_GUI:
-            self.fit_with_gui(Y)
+            self.fit_with_gui(Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
         else:
-            self.fit_without_gui()
+            self.fit_without_gui(cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
         self.is_fitted = True
 
     def transform(self):
@@ -47,23 +63,31 @@ class fastSNE:
     def one_iteration(self):
         return
 
-    def fit_with_gui(self, Y):
+    def fit_with_gui(self, Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # 0. configure the process launch mode 
-        multiprocessing.set_start_method('spawn')
+        multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd.
 
         # 1.   Launching the process responsible for the GUI
-        from fastSNE.fastSNE_gui import gui_worker, Shared_CPU_variables
+        from fastSNE.fastSNE_gui import gui_worker
         # 1.1  Inter-process communication for CUDA structures
         buffer_n_bytes = self.N * __MAX_K__ * 4 # x4 For float32
-        self.shared_buffer_A = cuda.mem_alloc(buffer_n_bytes)
-        self.shared_buffer_B = cuda.mem_alloc(buffer_n_bytes)
-        ipc_handle_Xld_A = cuda.mem_get_ipc_handle(self.shared_buffer_A)
-        ipc_handle_Xld_B = cuda.mem_get_ipc_handle(self.shared_buffer_B)
+        shared_buffer_A  = cuda.mem_alloc(buffer_n_bytes)
+        shared_buffer_B  = cuda.mem_alloc(buffer_n_bytes)
+        ipc_handle_Xld_A = cuda.mem_get_ipc_handle(shared_buffer_A)
+        ipc_handle_Xld_B = cuda.mem_get_ipc_handle(shared_buffer_B)
         # 1.2  Shared variable on CPU
-        shared_CPU_variables = Shared_CPU_variables(self.kern_alpha, self.perplexity, self.dist_metric)
-        print("Serialize Shared Variable: If the Shared_variable class instance is not directly serializable (e.g., for use with multiprocessing.Queue or Pipe), you might need to manually serialize it or ensure it only contains serializable elements.")
+        #   hyperparameters
+        kernel_alpha = multiprocessing.Value('f', self.kern_alpha)
+        perplexity   = multiprocessing.Value('f', self.perplexity)
+        dist_metric  = multiprocessing.Value('i', self.dist_metric)
+        #   state variables
+        gui_closed        = multiprocessing.Value('b', False)
+        isPhaseA          = multiprocessing.Value('b', True)
+        iterDone1         = multiprocessing.Value('b', False)
+        iterDone2         = multiprocessing.Value('b', False)
+        points_have_moved = multiprocessing.Value('b', True)
         # 1.3  Launching the GUI process proper
-        process_gui = multiprocessing.Process(target=gui_worker, args=([ipc_handle_Xld_A, ipc_handle_Xld_B], Y, shared_CPU_variables, self.N, self.Mld))
+        process_gui = multiprocessing.Process(target=gui_worker, args=(ipc_handle_Xld_A, ipc_handle_Xld_B, Y, self.N, self.Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, iterDone1, iterDone2, points_have_moved))
         process_gui.start()
 
         # 2.   Optimise until the GUI is closed
@@ -71,55 +95,31 @@ class fastSNE:
         while not gui_was_closed:
             self.one_iteration()
 
-            with shared_CPU_variables.points_have_moved.get_lock():
-                shared_CPU_variables.points_have_moved.value = True
+            with points_have_moved.get_lock():
+                points_have_moved.value = True
 
-            with shared_CPU_variables.gui_closed.get_lock():
-                gui_was_closed = shared_CPU_variables.gui_closed.value
+            with gui_closed.get_lock():
+                gui_was_closed = gui_closed.value
         process_gui.join()
-
-
-        self.free_all_GPU_memory()
-        print("fastSNE: GUI process has terminated")
+        self.free_all_GPU_memory(shared_buffer_A, shared_buffer_B, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
         return
     
-    def fit_without_gui(self):
-        for i in range(100):
-            self.one_iteration()
-        self.cpu_Xld = self.cuda_Xld_true_A.get()
-        self.free_all_GPU_memory()
+    def fit_without_gui(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
+        1/0
 
-    def free_all_GPU_memory(self):
-        # cuda_context.pop()
-        """ self.cuda_Xld_true_A.gpudata.free()
-        self.cuda_Xld_true_B.gpudata.free()
-        self.cuda_Xld_nest.gpudata.free()
-        self.cuda_Xld_mmtm.gpudata.free()
-        self.cuda_Xhd.gpudata.free() """
+    def free_all_GPU_memory(self, shared_buffer_A, shared_buffer_B, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
+        # cuda_context.pop() # not needed if pycuda.autoinit is used
+        cuda_Xhd.gpudata.free()
+        cuda_Xld_true_A.gpudata.free()
+        cuda_Xld_true_B.gpudata.free()
+        cuda_Xld_nest.gpudata.free()
+        cuda_Xld_mmtm.gpudata.free()
+        shared_buffer_A.free()
+        shared_buffer_B.free()
         return
 
 """ 
 class fastSNE:
-    def __init__(self, with_GUI, n_components=2, random_state=None):
-        self.with_GUI     = with_GUI
-        self.is_fitted    = False
-        self.random_state = random_state
-        if self.random_state is not None and not self.random_state > 0:
-            raise Exception("fastSNE: random_state must be a strictly positive integer")
-        self.N   = None
-        self.M   = None
-        self.cpu_Xhd  = None
-        self.cuda_Xhd = None
-        self.cpu_Xld  = None
-        self.cuda_Xld_true_A = None
-        self.cuda_Xld_true_B = None
-        self.cuda_Xld_nest   = None
-        self.cuda_Xld_mmtm   = None
-        print("For rendering: use directly the data that is on GPU (else GPU->CPU then CPU->GPU: wasteful)")
-        self.n_components = np.uint32(n_components)
-        self.kern_alpha   = np.float32(1.0)
-        self.perplexity   = np.float32(5.0)
-        self.dist_metric  = 0
 
     def fit(self, N, M, X, Y=None):
         self.N   = N
