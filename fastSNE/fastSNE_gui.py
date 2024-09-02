@@ -7,10 +7,6 @@ from multiprocessing import shared_memory
 import moderngl as mgl
 import pyglet
 
-import pycuda.driver as cuda
-import pycuda.autoinit
-import pycuda.gpuarray as gpuarray
-
 __TARGET_FPS__ = 20.0
 
 def gen_K_random_colours(K):
@@ -47,10 +43,8 @@ def determine_Y_colour(Y):
             cpu_Y_colours[i, 2] = np.float32(y_normed*blue1 + (1.0-y_normed)*blue0)  / 255.0
     return cpu_Y_colours
 
-
-    
 class ModernGLWindow(pyglet.window.Window):
-    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_ready_for_rendering, points_rendering_finished, **kwargs):
+    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, **kwargs):
         super().__init__(**kwargs)
 
         if(Mld != 2):
@@ -66,16 +60,14 @@ class ModernGLWindow(pyglet.window.Window):
         self.perplexity   = perplexity   # multiprocessing Value type
         self.dist_metric  = dist_metric  # multiprocessing Value type
         # communication with the main process
-        self.gui_closed        = gui_closed        # multiprocessing Value type
-        self.isPhaseA          = isPhaseA          # multiprocessing Value type
+        self.gui_closed   = gui_closed        # multiprocessing Value type
         self.points_ready_for_rendering = points_ready_for_rendering # multiprocessing Value type
         self.points_rendering_finished  = points_rendering_finished  # multiprocessing Value type
         # colours for each point, on CPU
         self.Y_colours = determine_Y_colour(cpu_Y) # size (N, 3), colour of each observation (removes an "if" in the render function)
         # Xld on CPU
         self.cpu_Xld = np.ndarray((N, Mld), dtype=np.float32, buffer=cpu_shared_mem.buf)
-        # remembers that a relevant user input was received, so the screen must be updated
-        self.redraw_because_of_user_input = False
+        self.redraw_now = False
 
         # -------   modernGL structs   -------
         self.ctx = mgl.create_context()
@@ -95,11 +87,6 @@ class ModernGLWindow(pyglet.window.Window):
 
         # prepare the data for the first frame
         self.retrieve_and_prepare_data()
-
-
-    def retrieve_and_prepare_data(self):
-        updated_data = self.cpu_Xld.astype('f4').tobytes()
-        self.vbo_positions.write(updated_data)
     
     def setup_shaders(self):
         vertex_shader = '''
@@ -123,31 +110,39 @@ class ModernGLWindow(pyglet.window.Window):
         return vertex_shader, fragment_shader
 
     def on_draw(self):
-        points_moved = self.update(0.0)
-        # only render is user input rcvd or points have moved
-        if points_moved or self.redraw_because_of_user_input:
-            self.ctx.clear()
-            self.vao.render(mgl.POINTS)
-        # reset the flag
-        self.redraw_because_of_user_input = False
+        # only draw when I want to
+        if not self.redraw_now:
+            return
+        self.redraw_now = False
+        
+        # render the screen
+        self.ctx.clear()
+        self.vao.render(mgl.POINTS)
+
+        # notify the main process that the rendering is done
+        with self.points_rendering_finished.get_lock():
+            self.points_rendering_finished.value = True
+        print("drawing")
     
     def on_close(self):
         self.vbo.release()
         self.vao.release()
         self.ctx.release()
         super().on_close()
+
+    def retrieve_and_prepare_data(self):
+        updated_data = self.cpu_Xld.astype('f4').tobytes()
+        self.vbo_positions.write(updated_data)
     
     def update(self, dt):
-        print("update called")
-        # self.retrieve_and_prepare_data()
+        # only draw if the points were updated
+        with self.points_ready_for_rendering.get_lock():
+            points_ready = self.points_ready_for_rendering.value
+            self.points_ready_for_rendering.value = False
+        if points_ready:
+            self.retrieve_and_prepare_data()
+            self.redraw_now = True
         
-        # point_have_moved = False
-        # with self.points_have_moved.get_lock():
-        #     point_have_moved = self.points_have_moved.value
-        #     self.points_have_moved.value = False
-        # if point_have_moved:
-        #     print("Update the data in the VBO every frame")
-        return True
 
     def on_mouse_press(self, x, y, button, modifiers):
         if button == pyglet.window.mouse.LEFT:
@@ -178,14 +173,14 @@ class ModernGLWindow(pyglet.window.Window):
             self.close()
 
 class FastSNE_gui:
-    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_ready_for_rendering, points_rendering_finished, window_w=640, window_h=480):
-        self.window = ModernGLWindow(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_ready_for_rendering, points_rendering_finished, width=window_w, height=window_h, caption='fastSNE')
+    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, window_w=640, window_h=480):
+        self.window = ModernGLWindow(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, width=window_w, height=window_h, caption='fastSNE')
         pyglet.clock.schedule_interval(self.window.update, 1.0/__TARGET_FPS__)
         pyglet.app.run() # blocks until the window is closed, everything is event-driven from there on
 
-def gui_worker(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_ready_for_rendering, points_rendering_finished):
+def gui_worker(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished):
     # ipc for Xld_A and Xld_B
-    gui = FastSNE_gui(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_ready_for_rendering, points_rendering_finished, window_w=800, window_h=600)
+    gui = FastSNE_gui(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, window_w=800, window_h=600)
 
     # notify the main process that the GUI has been closed
     with gui_closed.get_lock():
