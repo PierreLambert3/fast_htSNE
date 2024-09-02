@@ -1,6 +1,6 @@
 import numpy as np
 import multiprocessing
-
+from multiprocessing import shared_memory
 
 # import & init pycuda
 import pycuda.driver as cuda
@@ -42,7 +42,8 @@ class fastSNE:
         self.N        = N
         self.M        = M
         self.cpu_Xld  = (np.random.uniform(size=(N, self.Mld)).astype(np.float32) - 0.5) * 2.0
-        cuda_Xhd = gpuarray.to_gpu_async(Xhd)
+        # malloc GPU memory
+        cuda_Xhd        = gpuarray.to_gpu_async(Xhd)
         cuda_Xld_true_A = gpuarray.to_gpu(self.cpu_Xld)
         cuda_Xld_true_B = gpuarray.to_gpu(self.cpu_Xld)
         cuda_Xld_nest   = gpuarray.to_gpu(self.cpu_Xld)
@@ -64,58 +65,63 @@ class fastSNE:
         return
 
     def fit_with_gui(self, Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
-        # 0. configure the process launch mode 
+        # 1. configure the process launch mode 
         multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd.
 
-        # 1.   Launching the process responsible for the GUI
+        # 2. shared memory to pass data between the main process and the GUI
+        buffer_size = self.N * self.Mld * np.dtype(np.float32).itemsize
+        cpu_shared_mem_A = shared_memory.SharedMemory(create=True, size=buffer_size)
+        cpu_shared_mem_B = shared_memory.SharedMemory(create=True, size=buffer_size)
+        cpu_Xld_A = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem_A.buf)
+        cpu_Xld_B = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem_B.buf)
+        # copy (GPU->CPU) cuda_Xld_true_A and cuda_Xld_true_B to shared memory
+        cuda_Xld_true_A.get(cpu_Xld_A)
+        cuda_Xld_true_B.get(cpu_Xld_B)
+
+        print("self.cpu_Xld_A:   before ", cpu_Xld_A)
+
+
+        # 3.   Launching the process responsible for the GUI
         from fastSNE.fastSNE_gui import gui_worker
-        # 1.1  Inter-process communication for CUDA structures
-        buffer_n_bytes = self.N * __MAX_K__ * 4 # x4 For float32
-        shared_buffer_A  = cuda.mem_alloc(buffer_n_bytes)
-        shared_buffer_B  = cuda.mem_alloc(buffer_n_bytes)
-        ipc_handle_Xld_A = cuda.mem_get_ipc_handle(shared_buffer_A)
-        ipc_handle_Xld_B = cuda.mem_get_ipc_handle(shared_buffer_B)
-        # 1.2  Shared variable on CPU
-        #   hyperparameters
-        kernel_alpha = multiprocessing.Value('f', self.kern_alpha)
-        perplexity   = multiprocessing.Value('f', self.perplexity)
-        dist_metric  = multiprocessing.Value('i', self.dist_metric)
-        #   state variables
+        #  Shared variable on CPU:
+        #      hyperparameters
+        kernel_alpha      = multiprocessing.Value('f', self.kern_alpha)
+        perplexity        = multiprocessing.Value('f', self.perplexity)
+        dist_metric       = multiprocessing.Value('i', self.dist_metric)
+        #      state variables
         gui_closed        = multiprocessing.Value('b', False)
         isPhaseA          = multiprocessing.Value('b', True)
-        iterDone1         = multiprocessing.Value('b', False)
-        iterDone2         = multiprocessing.Value('b', False)
-        points_have_moved = multiprocessing.Value('b', True)
-        # 1.3  Launching the GUI process proper
-        process_gui = multiprocessing.Process(target=gui_worker, args=(ipc_handle_Xld_A, ipc_handle_Xld_B, Y, self.N, self.Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, iterDone1, iterDone2, points_have_moved))
+        points_updated    = multiprocessing.Value('b', True)
+        # 3.3  Launching the GUI process proper
+        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem_A, cpu_shared_mem_B, Y, self.N, self.Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_updated))
         process_gui.start()
 
-        # 2.   Optimise until the GUI is closed
+        # 4.   Optimise until the GUI is closed
         gui_was_closed = False
         while not gui_was_closed:
             self.one_iteration()
 
-            with points_have_moved.get_lock():
-                points_have_moved.value = True
+            with points_updated.get_lock():
+                points_updated.value = True
 
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
         process_gui.join()
-        self.free_all_GPU_memory(shared_buffer_A, shared_buffer_B, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
+        self.free_all_GPU_memory(cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
+        
         return
+    
     
     def fit_without_gui(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         1/0
 
-    def free_all_GPU_memory(self, shared_buffer_A, shared_buffer_B, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
+    def free_all_GPU_memory(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # cuda_context.pop() # not needed if pycuda.autoinit is used
         cuda_Xhd.gpudata.free()
         cuda_Xld_true_A.gpudata.free()
         cuda_Xld_true_B.gpudata.free()
         cuda_Xld_nest.gpudata.free()
         cuda_Xld_mmtm.gpudata.free()
-        shared_buffer_A.free()
-        shared_buffer_B.free()
         return
 
 """ 

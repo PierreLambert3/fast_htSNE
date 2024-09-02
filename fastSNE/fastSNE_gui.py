@@ -1,10 +1,15 @@
 # import the classics
 import numpy as np
 import multiprocessing
+from multiprocessing import shared_memory
 
 # import modernGL (renderer) and pyglet (windowerer)
 import moderngl as mgl
 import pyglet
+
+import pycuda.driver as cuda
+import pycuda.autoinit
+import pycuda.gpuarray as gpuarray
 
 __TARGET_FPS__ = 20.0
 
@@ -14,10 +19,10 @@ def gen_K_random_colours(K):
     from sklearn.cluster import KMeans
     kmeans = KMeans(n_clusters=K, n_init=1, max_iter=25)
     kmeans.fit(dataset)
-    return (kmeans.cluster_centers_ * 255.0).astype(np.uint8)
+    return (kmeans.cluster_centers_).astype(np.float32)
 
 def determine_Y_colour(Y):
-    cpu_Y_colours = np.zeros((len(Y), 3), dtype=np.uint8)
+    cpu_Y_colours = np.zeros((len(Y), 3), dtype=np.float32)
     is_classification  = type(Y[0, 0]) == np.int32
     if is_classification:
         label_colours = gen_K_random_colours(len(np.unique(Y)))
@@ -37,17 +42,16 @@ def determine_Y_colour(Y):
         blue1  = 0.0
         for i in range(len(Y)):
             y_normed = (Y[i, 0] - min_Y) / span
-            cpu_Y_colours[i, 0] = np.uint8(y_normed*red1 + (1.0-y_normed)*red0)
-            cpu_Y_colours[i, 1] = np.uint8(y_normed*green1 + (1.0-y_normed)*green0)
-            cpu_Y_colours[i, 2] = np.uint8(y_normed*blue1 + (1.0-y_normed)*blue0)
-    from pycuda import gpuarray
+            cpu_Y_colours[i, 0] = np.float32(y_normed*red1 + (1.0-y_normed)*red0)  / 255.0
+            cpu_Y_colours[i, 1] = np.float32(y_normed*green1 + (1.0-y_normed)*green0)  / 255.0
+            cpu_Y_colours[i, 2] = np.float32(y_normed*blue1 + (1.0-y_normed)*blue0)  / 255.0
     cuda_Y_colours = gpuarray.to_gpu(cpu_Y_colours)
     return cuda_Y_colours
 
 
     
 class ModernGLWindow(pyglet.window.Window):
-    def __init__(self, ipc_handle_Xld_A, ipc_handle_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, iterDone1, iterDone2, points_have_moved, **kwargs):
+    def __init__(self, smem_cpu_Xld_A, smem_cpu_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_updated, **kwargs):
         super().__init__(**kwargs)
         self.N   = N
         self.Mld = Mld
@@ -58,33 +62,73 @@ class ModernGLWindow(pyglet.window.Window):
         # communication with the main process
         self.gui_closed        = gui_closed        # multiprocessing Value type
         self.isPhaseA          = isPhaseA          # multiprocessing Value type
-        self.iterDone1         = iterDone1         # multiprocessing Value type
-        self.iterDone2         = iterDone2         # multiprocessing Value type
-        self.points_have_moved = points_have_moved
+        self.points_updated    = points_updated    # multiprocessing Value type
+        # shared memory for the data
+        self.cpu_Xld_A = np.ndarray((N, Mld), dtype=np.float32, buffer=smem_cpu_Xld_A.buf)
+        self.cpu_Xld_B = np.ndarray((N, Mld), dtype=np.float32, buffer=smem_cpu_Xld_B.buf)
+
+        print("self.cpu_Xld_A:   qsdsqsd ", self.cpu_Xld_A)
+        1/0
+
         # variables on the GPU
-        self.ipc_handle_Xld_A = ipc_handle_Xld_A # ipc handler for a ndarray on device of size (N, Mld)   written to by main thread 
-        self.ipc_handle_Xld_B = ipc_handle_Xld_B # ipc handler for a ndarray on device of size (N, Mld)   written to by main thread 
-        self.cuda_Y_colours = determine_Y_colour(cpu_Y) # size (N, 3), colour of each observation (removes an "if" in the render function)
-        # modernGL structures
+        self.cuda_Y_colours   = determine_Y_colour(cpu_Y) # size (N, 3), colour of each observation (removes an "if" in the render function)
+
+        # working variables: these are the ones that will be updated and rendered
+        self.cuda_Xld_px = gpuarray.to_gpu(np.zeros((N, self.Mld), dtype=np.float32))
+        
+        # prepare the data for the first frame
+        self.retrieve_and_prepare_data()
+
         self.ctx  = mgl.create_context()
+        # Update VBO for vertex positions
+        self.vbo = self.ctx.buffer(self.cuda_Xld_px.astype('f4').tobytes())
+        # Create CBO for colors
+        self.cbo = self.ctx.buffer(self.cuda_Y_colours.astype('f4').tobytes())
+        # Update VAO to include color data
+        self.vao = self.ctx.simple_vertex_array(self.prog, self.vbo, 'in_vert', self.cbo, 'in_color')
+        # Modify shaders to include color handling
         self.prog = self.ctx.program(
             vertex_shader='''
                 #version 330
                 in vec2 in_vert;
+                in vec3 in_color;
+                out vec3 color;
                 void main() {
                     gl_Position = vec4(in_vert, 0.0, 1.0);
+                    color = in_color;
                 }
             ''',
             fragment_shader='''
                 #version 330
+                in vec3 color;
                 out vec4 f_color;
                 void main() {
-                    f_color = vec4(1.0, 1.0, 1.0, 1.0);
+                    f_color = vec4(color, 1.0);
                 }
             ''',
         )
-        self.vbo = self.ctx.buffer(reserve=N * 2 * 4)
-        self.vao = self.ctx.simple_vertex_array(self.prog, self.vbo, 'in_vert')
+
+        
+        # # modernGL structures
+        # self.ctx  = mgl.create_context()
+        # self.prog = self.ctx.program(
+        #     vertex_shader='''
+        #         #version 330
+        #         in vec2 in_vert;
+        #         void main() {
+        #             gl_Position = vec4(in_vert, 0.0, 1.0);
+        #         }
+        #     ''',
+        #     fragment_shader='''
+        #         #version 330
+        #         out vec4 f_color;
+        #         void main() {
+        #             f_color = vec4(1.0, 1.0, 1.0, 1.0);
+        #         }
+        #     ''',
+        # )
+        # self.vbo = self.ctx.buffer(reserve=N * 2 * 4)
+        # self.vao = self.ctx.simple_vertex_array(self.prog, self.vbo, 'in_vert')
 
     def on_draw(self):
         self.clear()
@@ -133,29 +177,56 @@ class ModernGLWindow(pyglet.window.Window):
         if symbol == pyglet.window.key.ESCAPE:
             self.close()
 
+    def retrieve_and_prepare_data(self):
+        import ctypes
+        ipc_handle_array = (ctypes.c_byte * 64).from_buffer_copy(self.ipc_handle_Xld_B)
+        cuda_driver = ctypes.CDLL('libcuda.so')
+        gpu_mem_ptr = ctypes.c_void_p()
+        cuIpcOpenMemHandle = cuda_driver.cuIpcOpenMemHandle
+        cuIpcOpenMemHandle(ctypes.byref(gpu_mem_ptr), ipc_handle_array, 1)
+        cuMemcpyDtoD = cuda_driver.cuMemcpyDtoD
+        cuMemcpyDtoD(self.cuda_Xld_px.ptr, gpu_mem_ptr, int(self.N * self.Mld * 4))
+
+
+
+        """ # 1. get device pointer to the appropriate Xld on the GPU
+        Xld_mem = None
+        if self.isPhaseA.value:
+            Xld_mem = cuda.IPCMemoryHandle(self.ipc_handle_Xld_B)
+            # Xld_mem = cuda.ipc_open_mem_handle(self.ipc_handle_Xld_B)
+        else:
+            Xld_mem = cuda.IPCMemoryHandle(self.ipc_handle_Xld_A)
+            # Xld_mem = cuda.ipc_open_mem_handle(self.ipc_handle_Xld_A)
+        Xld_ptr = Xld_mem.open(cuda.Context.get_current()) """
+
+        """ # 2. copy the data to self.cuda_Xld_px
+        # cuda.memcpy_dtod(self.cuda_Xld_px.gpudata, Xld_ptr, self.N * self.Mld * 4)
+        cuda.memcpy_dtod(int(self.cuda_Xld_px.gpudata), int(Xld_ptr), self.N * self.Mld * 4)
+
+        # 3. scale the data with tis min and max values
+        # TODO
+        print("TODO: scale the data with tis min and max values") """
+
+
+        """ CUDA ipc: ne marche pas sur windows... 
+        carrement retirer multiprocessing et fair multithreading 
+        ==> le gui_thread dormira la plupart du temps """
+
 class FastSNE_gui:
-    def __init__(self, ipc_handle_Xld_A, ipc_handle_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, iterDone1, iterDone2, points_have_moved, window_w=640, window_h=480):
-        self.window = ModernGLWindow(ipc_handle_Xld_A, ipc_handle_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, iterDone1, iterDone2, points_have_moved, width=window_w, height=window_h, caption='fastSNE')
+    def __init__(self, smem_cpu_Xld_A, smem_cpu_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_updated, window_w=640, window_h=480):
+        self.window = ModernGLWindow(smem_cpu_Xld_A, smem_cpu_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_updated, width=window_w, height=window_h, caption='fastSNE')
         pyglet.clock.schedule_interval(self.window.update, 1.0/__TARGET_FPS__)
         pyglet.app.run() # blocks until the window is closed, everything is event-driven from there on
 
-def gui_worker(ipc_handle_Xld_A, ipc_handle_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, iterDone1, iterDone2, points_have_moved):
-    # import & init pycuda
-    import pycuda.driver as cuda
-    # import pycuda.autoinit
-    cuda.init()
-    cuda_context = cuda.Device(0).make_context()
-
+def gui_worker(smem_cpu_Xld_A, smem_cpu_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_updated):
     # ipc for Xld_A and Xld_B
-    gui = FastSNE_gui(ipc_handle_Xld_A, ipc_handle_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, iterDone1, iterDone2, points_have_moved, window_w=800, window_h=600)
+    gui = FastSNE_gui(smem_cpu_Xld_A, smem_cpu_Xld_B, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_updated, window_w=800, window_h=600)
 
     # notify the main process that the GUI has been closed
     with gui_closed.get_lock():
         pyglet.app.exit()
         gui_closed.value = True
     
-    # release the pycuda context
-    cuda_context.pop()
     return
 
 
