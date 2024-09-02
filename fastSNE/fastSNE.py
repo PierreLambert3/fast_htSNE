@@ -29,8 +29,7 @@ class fastSNE:
         self.cpu_Xld  = None
         # variables allocated on the device
         self.cuda_Xhd        = None
-        self.cuda_Xld_true_A = None # read by the GUI
-        self.cuda_Xld_true_B = None # read by the GUI
+        self.cuda_Xld_true   = None # read by the GUI
         self.cuda_Xld_nest   = None
         self.cuda_Xld_mmtm   = None
         # cuda streams
@@ -39,6 +38,14 @@ class fastSNE:
         self.stream_grads    = cuda.Stream()
     
     def fit(self, N, M, Xhd, Y=None):
+        # check input data
+        if N < 5:
+            raise Exception("fastSNE: the number of samples N must be at least 2")
+        if M < 2:
+            raise Exception("fastSNE: the number of dimensions M must be at least 2")
+        if np.isnan(Xhd).any():
+            raise Exception("fastSNE: the high-dimensional data contains NaNs")
+        # on CPU
         self.N        = N
         self.M        = M
         self.cpu_Xld  = (np.random.uniform(size=(N, self.Mld)).astype(np.float32) - 0.5) * 2.0
@@ -48,7 +55,7 @@ class fastSNE:
         cuda_Xld_true_B = gpuarray.to_gpu(self.cpu_Xld)
         cuda_Xld_nest   = gpuarray.to_gpu(self.cpu_Xld)
         cuda_Xld_mmtm   = gpuarray.to_gpu(np.zeros(self.cpu_Xld.shape, self.cpu_Xld.dtype))
-        
+        # launch the tSNE optimisation
         if self.with_GUI:
             self.fit_with_gui(Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
         else:
@@ -66,34 +73,28 @@ class fastSNE:
 
     def fit_with_gui(self, Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # 1. configure the process launch mode 
-        multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd.
+        multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd and often annoying
 
-        # 2. shared memory to pass data between the main process and the GUI
-        buffer_size = self.N * self.Mld * np.dtype(np.float32).itemsize
-        cpu_shared_mem_A = shared_memory.SharedMemory(create=True, size=buffer_size)
-        cpu_shared_mem_B = shared_memory.SharedMemory(create=True, size=buffer_size)
-        cpu_Xld_A = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem_A.buf)
-        cpu_Xld_B = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem_B.buf)
+        # 2. shared memory with GUI (on CPU)
+        cpu_shared_mem      = shared_memory.SharedMemory(create=True, size=(self.N * self.Mld * np.dtype(np.float32).itemsize))
+        cpu_Xld_arr_on_smem = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem.buf)
         # copy (GPU->CPU) cuda_Xld_true_A and cuda_Xld_true_B to shared memory
-        cuda_Xld_true_A.get(cpu_Xld_A)
-        cuda_Xld_true_B.get(cpu_Xld_B)
-
-        print("self.cpu_Xld_A:   before ", cpu_Xld_A)
-
+        cuda_Xld_true_A.get(cpu_Xld_arr_on_smem)
+        print("self.cpu_Xld_A:   before ", cpu_Xld_arr_on_smem)
 
         # 3.   Launching the process responsible for the GUI
         from fastSNE.fastSNE_gui import gui_worker
-        #  Shared variable on CPU:
-        #      hyperparameters
-        kernel_alpha      = multiprocessing.Value('f', self.kern_alpha)
-        perplexity        = multiprocessing.Value('f', self.perplexity)
-        dist_metric       = multiprocessing.Value('i', self.dist_metric)
-        #      state variables
-        gui_closed        = multiprocessing.Value('b', False)
-        isPhaseA          = multiprocessing.Value('b', True)
-        points_updated    = multiprocessing.Value('b', True)
+        #  Shared hyperparameters
+        kernel_alpha   = multiprocessing.Value('f', self.kern_alpha)
+        perplexity     = multiprocessing.Value('f', self.perplexity)
+        dist_metric    = multiprocessing.Value('i', self.dist_metric)
+        #  Shared state variables
+        gui_closed     = multiprocessing.Value('b', False)
+        isPhaseA       = multiprocessing.Value('b', True)
+        points_ready_for_rendering = multiprocessing.Value('b', False)
+        points_rendering_finished  = multiprocessing.Value('b', False)
         # 3.3  Launching the GUI process proper
-        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem_A, cpu_shared_mem_B, Y, self.N, self.Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_updated))
+        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem, Y, self.N, self.Mld, kernel_alpha, perplexity, dist_metric, gui_closed, isPhaseA, points_ready_for_rendering, points_rendering_finished))
         process_gui.start()
 
         # 4.   Optimise until the GUI is closed
@@ -101,8 +102,13 @@ class fastSNE:
         while not gui_was_closed:
             self.one_iteration()
 
-            with points_updated.get_lock():
-                points_updated.value = True
+            # an iteration is finished, it the GUI is done rendering the previous frame then notify it and reset sync states
+            with points_ready_for_rendering.get_lock():
+                with points_rendering_finished.get_lock():
+                    if points_rendering_finished.value is True:
+                        points_rendering_finished.value  = False
+                        points_ready_for_rendering.value = True
+                        # TODO: replace this -> need to async copy and when the copy is done, we can set the states as done now
 
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
