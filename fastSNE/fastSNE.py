@@ -3,8 +3,8 @@ import multiprocessing
 from multiprocessing import shared_memory
 
 # import & init pycuda
-import pycuda.autoinit
 import pycuda.driver as cuda
+import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import pycuda.gpuarray as gpuarray
 
@@ -13,30 +13,56 @@ __MAX_K__  = __MAX_PP__ * 3
 
 
 
-kernel_code = """
-#include <curand_kernel.h>
+# kernel_code = """
+# #include <curand_kernel.h>
 
-extern "C" {
+# extern "C" {
+# __global__ void move_points(float *Xld, int N, int M, unsigned long long seed) {
+#     int idx = threadIdx.x + blockDim.x * blockIdx.x;
+#     int stride = blockDim.x * gridDim.x;
+#     curandState state;
+
+#     if (idx >= N*M) {
+#         return;
+#     }
+    
+#     // Initialize CURAND
+#     curand_init(seed, idx, 0, &state);
+
+#     for (int i = idx; i < N*M; i += stride) {
+#         // Generate a random number between -0.1 and 0.1
+#         float rand_val = curand_uniform(&state) * 0.2f - 0.1f;
+#         Xld[i] += rand_val;
+#     }
+# }
+# }
+# """
+
+kernel_code = """
+#include <stdio.h>
+
 __global__ void move_points(float *Xld, int N, int M, unsigned long long seed) {
     int idx = threadIdx.x + blockDim.x * blockIdx.x;
-    int stride = blockDim.x * gridDim.x;
-    curandState state;
-
-    if (idx >= N*M) {
-        return;
+    if (idx < N * M) {
+        Xld[idx] += 1.0;
     }
-    
-    // Initialize CURAND
-    curand_init(seed, idx, 0, &state);
-
-    for (int i = idx; i < N*M; i += stride) {
-        // Generate a random number between -0.1 and 0.1
-        float rand_val = curand_uniform(&state) * 0.2f - 0.1f;
-        Xld[i] += rand_val;
+    if(idx == 0){
+        printf("Xld: %f \\n", Xld[idx]);
     }
-}
 }
 """
+
+# kernel_code = """
+# #include <stdio.h>
+# __global__ void move_points(float *Xld, int N, int M, unsigned long long seed) {
+#     int idx = threadIdx.x + blockDim.x * blockIdx.x;
+#     if (idx < N * M) {
+#         if(idx == 0){
+#             printf("Kernel executed at index %d\\n", idx);
+#         }
+#     }
+# }
+# """
 
 
 class fastSNE:
@@ -84,6 +110,11 @@ class fastSNE:
         cuda_Xld_true_B = gpuarray.to_gpu(self.cpu_Xld)
         cuda_Xld_nest   = gpuarray.to_gpu(self.cpu_Xld)
         cuda_Xld_mmtm   = gpuarray.to_gpu(np.zeros(self.cpu_Xld.shape, self.cpu_Xld.dtype))
+
+        # important to store the modules here: ELSE WE RECOMPILE THE KERNELS EVERY TIME!!
+        self.testing_compiled_cuda_code = SourceModule(kernel_code)
+
+
         # launch the tSNE optimisation
         if self.with_GUI:
             self.fit_with_gui(Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
@@ -97,24 +128,23 @@ class fastSNE:
         # return self.cpu_Xld
         return None
 
-    def one_iteration(self):
-        module = SourceModule(kernel_code)
-        # move_points = module.get_function("move_points")
-        """ N, M = self.cuda_Xld_true_A.shape
+    def one_iteration(self, cuda_Xld_true):
+        # return
+        move_points = self.testing_compiled_cuda_code.get_function("move_points")
+        N, M = cuda_Xld_true.shape
         stream = cuda.Stream()
         block_size = 256
         num_blocks = (N * M + block_size - 1) // block_size
-        seed = np.random.randint(0, 2**32) """
-        """ move_points(self.cuda_Xld_true_A, np.int32(N), np.int32(M), np.uint64(seed), block=(block_size, 1, 1), grid=(num_blocks, 1), stream=stream)
-        stream.synchronize() """
-
+        seed = np.random.randint(0, np.iinfo(np.uint32).max, dtype=np.uint32)
+        move_points(cuda_Xld_true, np.int32(N), np.int32(M), np.uint64(seed), block=(block_size, 1, 1), grid=(num_blocks, 1), stream=stream)
+        stream.synchronize()
 
     def fit_with_gui(self, Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # 1. configure the process launch mode 
         multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd and often annoying
 
         # 2. shared memory with GUI (on CPU)
-        cpu_shared_mem      = shared_memory.SharedMemory(create=True, size=(self.N * self.Mld * np.dtype(np.float32).itemsize))
+        cpu_shared_mem      = shared_memory.SharedMemory(create=True, size=int(self.N * self.Mld * np.dtype(np.float32).itemsize))
         cpu_Xld_arr_on_smem = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem.buf)
         # copy (GPU->CPU) cuda_Xld_true_A and cuda_Xld_true_B to shared memory
         cuda_Xld_true_A.get(cpu_Xld_arr_on_smem)
@@ -142,7 +172,12 @@ class fastSNE:
         gui_was_closed = False
         while not gui_was_closed:
             # One iteration of the tSNE optimisation
-            self.one_iteration()
+            if isPhaseA:
+                self.one_iteration(cuda_Xld_true_A)
+            else:
+                self.one_iteration(cuda_Xld_true_B)
+            
+            print("Iteration done")
 
             # if the GUI is done rendering the previous frame, feed it data
             gui_done = False

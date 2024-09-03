@@ -7,9 +7,9 @@ import fastSNE.fastSNE as fastSNE
 
 def fetch_dataset():
     # binary dump from a C flattened array of floats (32bits)
-    mnist_binaries_path = "/home/gneeeeeh/dev/datasets/bin/mnist/"
-    mnist_X_filename = mnist_binaries_path + "MNIST_PCA_X.bin"
-    mnist_Y_filename = mnist_binaries_path + "MNIST_PCA_Y.bin"
+    mnist_binaries_path = r"C:\Users\pierr\dev\datasets\bin\mnist"
+    mnist_X_filename = mnist_binaries_path + r"\MNIST_PCA_X.bin"
+    mnist_Y_filename = mnist_binaries_path + r"\MNIST_PCA_Y.bin"
     N = 60*1000
     M = 50
 
@@ -19,13 +19,13 @@ def fetch_dataset():
 
     # allocate new dataset
     n_times_larger = 7
-    N_new = 60*1000 * n_times_larger
+    N_new = N * n_times_larger
     X_new = np.zeros((N_new, M), dtype=np.float32)
     Y_new = np.zeros((N_new, 1), dtype=np.float32)
-
+    perms = np.random.permutation(N)
     for i in range(n_times_larger):
-        X_new[i*N:(i+1)*N, :] = X[np.random.permutation(N), :]
-        Y_new[i*N:(i+1)*N, :] = Y[np.random.permutation(N), :]
+        X_new[i*N:(i+1)*N, :] = X[perms, :]
+        Y_new[i*N:(i+1)*N, :] = Y[perms, :]
 
     # shuffle the dataset
     perms = np.random.permutation(N_new)
@@ -33,7 +33,7 @@ def fetch_dataset():
     Y_new = Y_new[perms, :]
 
     # add some noise
-    X_new += np.random.normal(0, 0.1, X_new.shape)
+    X_new += np.random.normal(0, 5.0, X_new.shape)
 
     return N_new, M, X_new, Y_new.astype(np.int32)
     
