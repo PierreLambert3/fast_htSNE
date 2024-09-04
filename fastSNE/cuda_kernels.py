@@ -106,7 +106,7 @@ __global__ void kernel_scale_X(float* X, float* mins, float* maxs, uint32_t N, u
     }
     __syncthreads();
 
-    // scale the data
+    // scale the data: (-0.75 to 0.75)  and shift the data (y min = -1.0)
     float value   = X[obs_i*M + var_i];
     float min_val = shared_memory_scaling[0];
     float range   = shared_memory_scaling[1];

@@ -10,8 +10,13 @@ import pycuda.gpuarray as gpuarray
 
 from fastSNE.cuda_kernels import kernel_minMax_reduction, kernel_X_to_transpose, kernel_scale_X
 
-__MAX_PP__ = 80
-__MAX_K__  = __MAX_PP__ * 3
+__MAX_PERPLEXITY__ = 80.0
+__MIN_PERPLEXITY__ = 1.5
+__MAX_K__  = __MAX_PERPLEXITY__ * 3
+__MAX_KERNEL_ALPHA__ = 100.0
+__MIN_KERNEL_ALPHA__ = 0.05
+__MAX_ATTRACTION_MULTIPLIER__ = 10.0
+__MIN_ATTRACTION_MULTIPLIER__ = 0.1
 
 class Kernel_shapes:
     def __init__(self, N_threads_total, threads_per_block_multiple_of, smem_n_float32_per_thread, cuda_device_attributes):
@@ -48,6 +53,170 @@ class Kernel_shapes:
         self.grid_y_size            = 1
 
 class fastSNE:
+    def __init__(self, with_GUI, n_components=2, random_state=None):
+        # state variables
+        self.with_GUI     = with_GUI
+        self.is_fitted    = False
+        self.random_state = random_state
+        if self.random_state is not None and not self.random_state > 0:
+            raise Exception("fastSNE: random_state must be a strictly positive integer")
+        # dataset and hyperparameters
+        self.N            = None
+        self.Mhd          = None
+        self.Mld          = n_components
+        assert self.Mld >= 2
+        self.kern_alpha   = np.float32(1.0)
+        self.perplexity   = np.float32(5.0)
+        self.attrac_mult  = np.float32(1.0)
+        self.dist_metric  = 0
+        assert self.dist_metric in [0, 1, 2, 3]
+        assert self.kern_alpha < __MAX_KERNEL_ALPHA__ and self.kern_alpha > __MIN_KERNEL_ALPHA__
+        assert self.perplexity < __MAX_PERPLEXITY__ and self.perplexity > __MIN_PERPLEXITY__
+        assert self.attrac_mult < __MAX_ATTRACTION_MULTIPLIER__ and self.attrac_mult > __MIN_ATTRACTION_MULTIPLIER__
+        # result
+        self.cpu_Xld  = None
+        # variables allocated on the device
+        self.cuda_Xhd        = None
+        self.cuda_Xld_true   = None # read by the GUI
+        self.cuda_Xld_nest   = None
+        self.cuda_Xld_mmtm   = None
+        # cuda streams
+        self.stream_minMax   = cuda.Stream() # used in GUI mode
+        self.stream_neigh_HD = cuda.Stream()
+        self.stream_neigh_LD = cuda.Stream()
+        self.stream_grads    = cuda.Stream()
+    
+    def fit(self, N, M, Xhd, Y=None):
+        # check input data
+        if N < 5:
+            raise Exception("fastSNE: the number of samples N must be at least 2")
+        if M < 2:
+            raise Exception("fastSNE: the number of dimensions M must be at least 2")
+        if np.isnan(Xhd).any():
+            raise Exception("fastSNE: the high-dimensional data contains NaNs")
+        # on CPU
+        self.N        = N
+        self.M        = M
+        self.cpu_Xld  = ((np.random.uniform(size=(N, self.Mld)).astype(np.float32) - 0.5) * 2.0) * 4.2
+        # malloc GPU memory
+        cuda_Xhd        = gpuarray.to_gpu_async(Xhd)
+        cuda_Xld_true_A = gpuarray.to_gpu(self.cpu_Xld)
+        cuda_Xld_true_B = gpuarray.to_gpu(self.cpu_Xld)
+        cuda_Xld_nest   = gpuarray.to_gpu(self.cpu_Xld)
+        cuda_Xld_mmtm   = gpuarray.to_gpu(np.zeros(self.cpu_Xld.shape, self.cpu_Xld.dtype))
+
+        self.configue_and_initialise_CUDA_kernels_please()
+
+        # launch the tSNE optimisation
+        if self.with_GUI:
+            self.fit_with_gui(Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
+        else:
+            self.fit_without_gui(cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
+        self.is_fitted = True
+
+    def transform(self):
+        if not self.is_fitted:
+            raise Exception("fastSNE: transform() called before fit(), or fit failed crashingly")
+        # return self.cpu_Xld
+        return None
+
+    def one_iteration(self, cuda_Xld_true):
+        return
+
+    def fit_with_gui(self, Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
+        # 1. configure the process launch mode 
+        multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd and often annoying
+
+        # 2. shared memory with GUI (on CPU)
+        cpu_shared_mem      = shared_memory.SharedMemory(create=True, size=int(self.N * self.Mld * np.dtype(np.float32).itemsize))
+        cpu_Xld_arr_on_smem = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem.buf)
+        # copy (GPU->CPU) cuda_Xld_true_A and cuda_Xld_true_B to shared memory
+        cuda_Xld_true_A.get(cpu_Xld_arr_on_smem)
+        # temp structures related to preprocessing the data for the GUI
+        cuda_Xld_temp_Xld         = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
+        cuda_Xld_T_temp_lvl1_mins = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
+        cuda_Xld_T_temp_lvl1_maxs = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
+
+        # 3.   Launching the process responsible for the GUI
+        from fastSNE.fastSNE_gui import gui_worker
+        #  Shared hyperparameters
+        kernel_alpha   = multiprocessing.Value('f', self.kern_alpha)
+        perplexity     = multiprocessing.Value('f', self.perplexity)
+        attrac_mult    = multiprocessing.Value('f', self.attrac_mult)
+        dist_metric    = multiprocessing.Value('i', self.dist_metric)
+        #  Shared state variables
+        gui_closed     = multiprocessing.Value('b', False)
+        points_ready_for_rendering = multiprocessing.Value('b', False)
+        points_rendering_finished  = multiprocessing.Value('b', True)
+        # 3.3  Launching the GUI process proper
+        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem, Y, self.N, self.Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished))
+        process_gui.start()
+
+        # 4.   Optimise until the GUI is closed
+        isPhaseA       = True
+        gui_data_prep_phase = 0
+        busy_copying__for_GUI = False
+        gui_was_closed = False
+        while not gui_was_closed:
+            # sync all streams (else read/writes my conflict with versions A and B)
+            self.stream_minMax.synchronize()
+            self.stream_neigh_HD.synchronize()
+            self.stream_neigh_LD.synchronize()
+            self.stream_grads.synchronize()
+
+            # One iteration of the tSNE optimisation
+            if isPhaseA:
+                self.one_iteration(cuda_Xld_true_A)
+            else:
+                self.one_iteration(cuda_Xld_true_B)
+            
+            # on phase A : write to A, read from B
+
+            # GUI communication & preparation of the data for the GUI
+            if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
+                # if we were copying the data for the GUI, notify the GUI that the data is ready
+                if busy_copying__for_GUI:
+                    busy_copying__for_GUI = False
+                    with points_rendering_finished.get_lock():
+                        points_rendering_finished.value = False
+                    with points_ready_for_rendering.get_lock():
+                        points_ready_for_rendering.value = True
+                # copy the fresh data to cuda_Xld_temp as a transposed matrix
+                Xld_to_transpose = cuda_Xld_true_B if isPhaseA else cuda_Xld_true_A
+                cuda_Xld_temp_Xld.set_async(Xld_to_transpose, stream=self.stream_minMax)
+                self.compiled_X_to_transpose.get_function("kernel_X_to_transpose")(Xld_to_transpose, cuda_Xld_T_temp_lvl1_maxs, np.uint32(self.N), np.uint32(self.Mld), block=(self.Kshapes_transpose.threads_per_block, 1, 1), grid=(self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size), stream=self.stream_minMax)
+                cuda_Xld_T_temp_lvl1_mins.set_async(cuda_Xld_T_temp_lvl1_maxs, stream=self.stream_minMax)
+
+            elif gui_data_prep_phase == 1: # perform the min-max reduction on cuda_Xld_temp, & scale the data to [0, 1] with the results
+                self.scaling_of_points(cuda_Xld_temp_Xld, cuda_Xld_T_temp_lvl1_mins, cuda_Xld_T_temp_lvl1_maxs)
+
+            else: # copy cuda_Xld_temp to cpu_Xld_arr_on_smem, if the GUI is ready
+                gui_done = False
+                busy_copying__for_GUI = False
+                with points_rendering_finished.get_lock():
+                    gui_done = points_rendering_finished.value
+                if gui_done:
+                    cuda_Xld_temp_Xld.get_async(stream=self.stream_minMax, ary=cpu_Xld_arr_on_smem)
+                    busy_copying__for_GUI = True
+            gui_data_prep_phase = (gui_data_prep_phase + 1) % 3
+
+            # switch phase
+            isPhaseA = not isPhaseA
+
+            with gui_closed.get_lock():
+                gui_was_closed = gui_closed.value
+        process_gui.join()
+
+        cpu_shared_mem.unlink()
+        self.free_all_GPU_memory(cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
+        
+        return
+    
+    
+    def fit_without_gui(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
+        1/0
+
+
     def scaling_of_points(self, cuda_Xld_temp_Xld, cuda_Xld_temp_lvl1_mins, cuda_Xld_temp_lvl1_maxs):
         cuda_kernel = self.compiled_minMax_reduction.get_function("perform_minMax_reduction")
         stream      = self.stream_minMax
@@ -197,173 +366,6 @@ class fastSNE:
         self.compiled_minMax_reduction = SourceModule(kernel_minMax_reduction, options=compiler_options)
         self.compiled_X_to_transpose   = SourceModule(kernel_X_to_transpose, options=compiler_options)
         self.compiled_scaling_X        = SourceModule(kernel_scale_X, options=compiler_options)
-
-    def __init__(self, with_GUI, n_components=2, random_state=None):
-        # state variables
-        self.with_GUI     = with_GUI
-        self.is_fitted    = False
-        self.random_state = random_state
-        if self.random_state is not None and not self.random_state > 0:
-            raise Exception("fastSNE: random_state must be a strictly positive integer")
-        # dataset and hyperparameters
-        self.N            = None
-        self.Mhd          = None
-        self.Mld          = n_components
-        self.kern_alpha   = np.float32(1.0)
-        self.perplexity   = np.float32(5.0)
-        self.dist_metric  = 0
-        # result
-        self.cpu_Xld  = None
-        # variables allocated on the device
-        self.cuda_Xhd        = None
-        self.cuda_Xld_true   = None # read by the GUI
-        self.cuda_Xld_nest   = None
-        self.cuda_Xld_mmtm   = None
-        # cuda streams
-        self.stream_minMax   = cuda.Stream() # used in GUI mode
-        self.stream_neigh_HD = cuda.Stream()
-        self.stream_neigh_LD = cuda.Stream()
-        self.stream_grads    = cuda.Stream()
-    
-    def fit(self, N, M, Xhd, Y=None):
-        # check input data
-        if N < 5:
-            raise Exception("fastSNE: the number of samples N must be at least 2")
-        if M < 2:
-            raise Exception("fastSNE: the number of dimensions M must be at least 2")
-        if np.isnan(Xhd).any():
-            raise Exception("fastSNE: the high-dimensional data contains NaNs")
-        # on CPU
-        self.N        = N
-        self.M        = M
-        self.cpu_Xld  = ((np.random.uniform(size=(N, self.Mld)).astype(np.float32) - 0.5) * 2.0) * 4.2
-        # malloc GPU memory
-        cuda_Xhd        = gpuarray.to_gpu_async(Xhd)
-        cuda_Xld_true_A = gpuarray.to_gpu(self.cpu_Xld)
-        cuda_Xld_true_B = gpuarray.to_gpu(self.cpu_Xld)
-        cuda_Xld_nest   = gpuarray.to_gpu(self.cpu_Xld)
-        cuda_Xld_mmtm   = gpuarray.to_gpu(np.zeros(self.cpu_Xld.shape, self.cpu_Xld.dtype))
-
-        self.configue_and_initialise_CUDA_kernels_please()
-
-        # launch the tSNE optimisation
-        if self.with_GUI:
-            self.fit_with_gui(Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
-        else:
-            self.fit_without_gui(cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
-        self.is_fitted = True
-
-    def transform(self):
-        if not self.is_fitted:
-            raise Exception("fastSNE: transform() called before fit(), or fit failed crashingly")
-        # return self.cpu_Xld
-        return None
-
-    def one_iteration(self, cuda_Xld_true):
-        return
-
-    def fit_with_gui(self, Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
-        # 1. configure the process launch mode 
-        multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd and often annoying
-
-        # 2. shared memory with GUI (on CPU)
-        cpu_shared_mem      = shared_memory.SharedMemory(create=True, size=int(self.N * self.Mld * np.dtype(np.float32).itemsize))
-        cpu_Xld_arr_on_smem = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem.buf)
-        # copy (GPU->CPU) cuda_Xld_true_A and cuda_Xld_true_B to shared memory
-        cuda_Xld_true_A.get(cpu_Xld_arr_on_smem)
-        # temp structures related to preprocessing the data for the GUI
-        cuda_Xld_temp_Xld         = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
-        cuda_Xld_T_temp_lvl1_mins = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
-        cuda_Xld_T_temp_lvl1_maxs = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
-
-        # 3.   Launching the process responsible for the GUI
-        from fastSNE.fastSNE_gui import gui_worker
-        #  Shared hyperparameters
-        kernel_alpha   = multiprocessing.Value('f', self.kern_alpha)
-        perplexity     = multiprocessing.Value('f', self.perplexity)
-        dist_metric    = multiprocessing.Value('i', self.dist_metric)
-        #  Shared state variables
-        gui_closed     = multiprocessing.Value('b', False)
-        points_ready_for_rendering = multiprocessing.Value('b', False)
-        points_rendering_finished  = multiprocessing.Value('b', True)
-        # 3.3  Launching the GUI process proper
-        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem, Y, self.N, self.Mld, kernel_alpha, perplexity, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished))
-        process_gui.start()
-
-        # 4.   Optimise until the GUI is closed
-        isPhaseA       = True
-        gui_data_prep_phase = 0
-        busy_copying__for_GUI = False
-        gui_was_closed = False
-        while not gui_was_closed:
-            # sync all streams (else read/writes my conflict with versions A and B)
-            self.stream_minMax.synchronize()
-            self.stream_neigh_HD.synchronize()
-            self.stream_neigh_LD.synchronize()
-            self.stream_grads.synchronize()
-
-            # One iteration of the tSNE optimisation
-            if isPhaseA:
-                self.one_iteration(cuda_Xld_true_A)
-            else:
-                self.one_iteration(cuda_Xld_true_B)
-            
-            # on phase A : write to A, read from B
-
-            # GUI communication & preparation of the data for the GUI
-            if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
-                # if we were copying the data for the GUI, notify the GUI that the data is ready
-                if busy_copying__for_GUI:
-                    busy_copying__for_GUI = False
-                    with points_rendering_finished.get_lock():
-                        points_rendering_finished.value = False
-                    with points_ready_for_rendering.get_lock():
-                        points_ready_for_rendering.value = True
-                # copy the fresh data to cuda_Xld_temp as a transposed matrix
-                Xld_to_transpose = None
-                if isPhaseA:
-                    Xld_to_transpose = cuda_Xld_true_B
-                else:
-                    Xld_to_transpose = cuda_Xld_true_A
-                cuda_Xld_temp_Xld.set_async(Xld_to_transpose, stream=self.stream_minMax)
-                self.compiled_X_to_transpose.get_function("kernel_X_to_transpose")(Xld_to_transpose, cuda_Xld_T_temp_lvl1_maxs, np.uint32(self.N), np.uint32(self.Mld), block=(self.Kshapes_transpose.threads_per_block, 1, 1), grid=(self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size), stream=self.stream_minMax)
-                cuda_Xld_T_temp_lvl1_mins.set_async(cuda_Xld_T_temp_lvl1_maxs, stream=self.stream_minMax)
-
-            elif gui_data_prep_phase == 1: # perform the min-max reduction on cuda_Xld_temp, & scale the data to [0, 1] with the results
-                self.scaling_of_points(cuda_Xld_temp_Xld, cuda_Xld_T_temp_lvl1_mins, cuda_Xld_T_temp_lvl1_maxs)
-                print("SCALING FINISHED")
-
-            else: # copy cuda_Xld_temp to cpu_Xld_arr_on_smem, if the GUI is ready
-                gui_done = False
-                busy_copying__for_GUI = False
-                with points_rendering_finished.get_lock():
-                    gui_done = points_rendering_finished.value
-                if gui_done:
-                    cuda_Xld_temp_Xld.get_async(stream=self.stream_minMax, ary=cpu_Xld_arr_on_smem)
-                    busy_copying__for_GUI = True
-            gui_data_prep_phase = (gui_data_prep_phase + 1) % 3
-
-
-
-
-            # switch phase
-            isPhaseA = not isPhaseA
-
-            # sync the gradient computation stream and neighbour retrieval streams
-            # TODO HERE
-
-            with gui_closed.get_lock():
-                gui_was_closed = gui_closed.value
-        process_gui.join()
-
-        cpu_shared_mem.unlink()
-        self.free_all_GPU_memory(cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
-        
-        return
-    
-    
-    def fit_without_gui(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
-        1/0
 
     def free_all_GPU_memory(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # cuda_context.pop() # not needed if pycuda.autoinit is used
