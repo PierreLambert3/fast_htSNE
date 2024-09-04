@@ -8,7 +8,7 @@ import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import pycuda.gpuarray as gpuarray
 
-from fastSNE.cuda_kernels import kernel_minMax_reduction
+from fastSNE.cuda_kernels import kernel_minMax_reduction, kernel_X_to_transpose, kernel_scale_X
 
 __MAX_PP__ = 80
 __MAX_K__  = __MAX_PP__ * 3
@@ -48,16 +48,84 @@ class Kernel_shapes:
         self.grid_y_size            = 1
 
 class fastSNE:
-
-    def scaling_of_points(self, cuda_Xld_temp):
-        """ write into reduction1_result_maxs  
-        then reduction1_result_max2  then ... """
-        pass
+    def scaling_of_points(self, cuda_Xld_temp_Xld, cuda_Xld_temp_lvl1_mins, cuda_Xld_temp_lvl1_maxs):
+        cuda_kernel = self.compiled_minMax_reduction.get_function("perform_minMax_reduction")
+        stream      = self.stream_minMax
+        # level 1 reduction (special case because we don't want to write on the cuda_Xld_temp_Xld)
+        block_size  = self.Kshapes_minMax_lvl_1.threads_per_block
+        grid_shape  = (self.Kshapes_minMax_lvl_1.grid_x_size, self.Kshapes_minMax_lvl_1.grid_y_size)
+        smem_n_bytes = self.Kshapes_minMax_lvl_1.smem_n_bytes_per_block
+        N_after_reduction = self.perdim_remaining_after_reduction1
+        cuda_kernel(cuda_Xld_temp_lvl1_mins, cuda_Xld_temp_lvl1_maxs,\
+                    self.reduction1_result_mins, self.reduction1_result_maxs, np.uint32(self.N), np.uint32(self.Mld), np.uint32(N_after_reduction),\
+                    block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        # level 2 reduction
+        if not self.do_reduction2:
+            mins = self.reduction1_result_mins
+            maxs = self.reduction1_result_maxs
+            block_size = self.Kshapes_transpose.threads_per_block
+            grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
+            smem_n_bytes = block_size * 4
+            self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+            return
+        block_size  = self.Kshapes_minMax_lvl_2.threads_per_block
+        grid_shape  = (self.Kshapes_minMax_lvl_2.grid_x_size, self.Kshapes_minMax_lvl_2.grid_y_size)
+        smem_n_bytes = self.Kshapes_minMax_lvl_2.smem_n_bytes_per_block
+        N_after_reduction = self.perdim_remaining_after_reduction2
+        cuda_kernel(self.reduction1_result_mins, self.reduction1_result_maxs,\
+                    self.reduction2_result_mins, self.reduction2_result_maxs, np.uint32(self.perdim_remaining_after_reduction1), np.uint32(self.Mld), np.uint32(N_after_reduction),\
+                    block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        # level 3 reduction
+        if not self.do_reduction3:
+            mins = self.reduction2_result_mins
+            maxs = self.reduction2_result_maxs
+            block_size = self.Kshapes_transpose.threads_per_block
+            grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
+            smem_n_bytes = block_size * 4
+            self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+            return
+        block_size  = self.Kshapes_minMax_lvl_3.threads_per_block
+        grid_shape  = (self.Kshapes_minMax_lvl_3.grid_x_size, self.Kshapes_minMax_lvl_3.grid_y_size)
+        smem_n_bytes = self.Kshapes_minMax_lvl_3.smem_n_bytes_per_block
+        N_after_reduction = self.perdim_remaining_after_reduction3
+        cuda_kernel(self.reduction2_result_mins, self.reduction2_result_maxs,\
+                    self.reduction3_result_mins, self.reduction3_result_maxs, np.uint32(self.perdim_remaining_after_reduction2), np.uint32(self.Mld), np.uint32(N_after_reduction),\
+                    block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        # level 4 reduction
+        if not self.do_reduction4:
+            mins = self.reduction3_result_mins
+            maxs = self.reduction3_result_maxs
+            block_size = self.Kshapes_transpose.threads_per_block
+            grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
+            smem_n_bytes = block_size * 4
+            self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+            return
+        block_size  = self.Kshapes_minMax_lvl_4.threads_per_block
+        grid_shape  = (self.Kshapes_minMax_lvl_4.grid_x_size, self.Kshapes_minMax_lvl_4.grid_y_size)
+        smem_n_bytes = self.Kshapes_minMax_lvl_4.smem_n_bytes_per_block
+        N_after_reduction = self.perdim_remaining_after_reduction4
+        cuda_kernel(self.reduction3_result_mins, self.reduction3_result_maxs,\
+                    self.reduction4_result_mins, self.reduction4_result_maxs, np.uint32(self.perdim_remaining_after_reduction3), np.uint32(self.Mld), np.uint32(N_after_reduction),\
+                    block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        # final scaling
+        mins = self.reduction4_result_mins
+        maxs = self.reduction4_result_maxs
+        block_size = self.Kshapes_transpose.threads_per_block
+        grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
+        smem_n_bytes = block_size * 4
+        self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
     def configue_and_initialise_CUDA_kernels_please(self):
         N, M, Mld = self.N, self.M, self.Mld
         cuda_device = cuda.Device(0)
         cuda_device_attributes = cuda_device.get_attributes()
+
+        # ------------ 0. kernels used for getting the transpose of Xld  -------
+        n_threads = N
+        multiple_of = 32 if n_threads > 32 else 1
+        smem_n_float32_per_thread = 1
+        self.Kshapes_transpose = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes)
+        self.Kshapes_transpose.grid_y_size = Mld
 
         # ------------ 1. kernels used for rendering (ie: scaling points between 0.0f and 1.0f)  -------
         #    finding the min and max values for each Mld dimension
@@ -127,6 +195,8 @@ class fastSNE:
         # ------------ 3. Compiling the CUDA kernels -------
         compiler_options = ["-O3", "--use_fast_math", "-prec-div=false", "-ftz=true", "-prec-sqrt=false", "-fmad=true"] # safe arithmetics are for the weak
         self.compiled_minMax_reduction = SourceModule(kernel_minMax_reduction, options=compiler_options)
+        self.compiled_X_to_transpose   = SourceModule(kernel_X_to_transpose, options=compiler_options)
+        self.compiled_scaling_X        = SourceModule(kernel_scale_X, options=compiler_options)
 
     def __init__(self, with_GUI, n_components=2, random_state=None):
         # state variables
@@ -138,7 +208,7 @@ class fastSNE:
         # dataset and hyperparameters
         self.N            = None
         self.Mhd          = None
-        self.Mld          = np.uint32(n_components)
+        self.Mld          = n_components
         self.kern_alpha   = np.float32(1.0)
         self.perplexity   = np.float32(5.0)
         self.dist_metric  = 0
@@ -166,7 +236,7 @@ class fastSNE:
         # on CPU
         self.N        = N
         self.M        = M
-        self.cpu_Xld  = (np.random.uniform(size=(N, self.Mld)).astype(np.float32) - 0.5) * 2.0
+        self.cpu_Xld  = ((np.random.uniform(size=(N, self.Mld)).astype(np.float32) - 0.5) * 2.0) * 4.2
         # malloc GPU memory
         cuda_Xhd        = gpuarray.to_gpu_async(Xhd)
         cuda_Xld_true_A = gpuarray.to_gpu(self.cpu_Xld)
@@ -190,15 +260,7 @@ class fastSNE:
         return None
 
     def one_iteration(self, cuda_Xld_true):
-        # return
-        move_points = self.compiled_minMax_reduction.get_function("perform_reduction")
-        N, M = cuda_Xld_true.shape
-        stream = cuda.Stream()
-        block_size = 256
-        num_blocks = (N * M + block_size - 1) // block_size
-        seed = np.random.randint(0, np.iinfo(np.uint32).max, dtype=np.uint32)
-        move_points(cuda_Xld_true, np.int32(N), np.int32(M), np.uint64(seed), block=(block_size, 1, 1), grid=(num_blocks, 1), stream=stream)
-        stream.synchronize()
+        return
 
     def fit_with_gui(self, Y, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # 1. configure the process launch mode 
@@ -210,7 +272,9 @@ class fastSNE:
         # copy (GPU->CPU) cuda_Xld_true_A and cuda_Xld_true_B to shared memory
         cuda_Xld_true_A.get(cpu_Xld_arr_on_smem)
         # temp structures related to preprocessing the data for the GUI
-        cuda_Xld_temp = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
+        cuda_Xld_temp_Xld         = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
+        cuda_Xld_T_temp_lvl1_mins = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
+        cuda_Xld_T_temp_lvl1_maxs = gpuarray.to_gpu(np.zeros((self.N, self.Mld), dtype=np.float32))
 
         # 3.   Launching the process responsible for the GUI
         from fastSNE.fastSNE_gui import gui_worker
@@ -232,6 +296,12 @@ class fastSNE:
         busy_copying__for_GUI = False
         gui_was_closed = False
         while not gui_was_closed:
+            # sync all streams (else read/writes my conflict with versions A and B)
+            self.stream_minMax.synchronize()
+            self.stream_neigh_HD.synchronize()
+            self.stream_neigh_LD.synchronize()
+            self.stream_grads.synchronize()
+
             # One iteration of the tSNE optimisation
             if isPhaseA:
                 self.one_iteration(cuda_Xld_true_A)
@@ -240,32 +310,7 @@ class fastSNE:
             
             # on phase A : write to A, read from B
 
-            # print("Iteration done")
-
-            # if the GUI is done rendering the previous frame, feed it data
-            """ gui_done = False
-            with points_rendering_finished.get_lock():
-                gui_done = points_rendering_finished.value
-            if gui_done:
-                if busy_copying__for_GUI:
-                    busy_copying__for_GUI = False
-                    # wait for the previous copy to finish
-                    stream_write_to_CPU.synchronize()
-                    # notify the GUI that the data is ready
-                    with points_rendering_finished.get_lock():
-                        points_rendering_finished.value = False
-                    with points_ready_for_rendering.get_lock():
-                        points_ready_for_rendering.value = True
-                else:
-                    busy_copying__for_GUI = True
-                    # copy contents of cuda_Xld_true_A/B to cpu_Xld_arr_on_smem
-                    if isPhaseA:
-                        cuda_Xld_true_B.get_async(stream=stream_write_to_CPU, ary=cpu_Xld_arr_on_smem)
-                    else:
-                        cuda_Xld_true_A.get_async(stream=stream_write_to_CPU, ary=cpu_Xld_arr_on_smem) """
-
             # GUI communication & preparation of the data for the GUI
-            self.stream_minMax.synchronize()
             if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
                 # if we were copying the data for the GUI, notify the GUI that the data is ready
                 if busy_copying__for_GUI:
@@ -274,20 +319,27 @@ class fastSNE:
                         points_rendering_finished.value = False
                     with points_ready_for_rendering.get_lock():
                         points_ready_for_rendering.value = True
-                # copy the fresh data to cuda_Xld_temp for further processing
+                # copy the fresh data to cuda_Xld_temp as a transposed matrix
+                Xld_to_transpose = None
                 if isPhaseA:
-                    cuda_Xld_temp.set_async(cuda_Xld_true_B, stream=self.stream_minMax)
+                    Xld_to_transpose = cuda_Xld_true_B
                 else:
-                    cuda_Xld_temp.set_async(cuda_Xld_true_A, stream=self.stream_minMax)
+                    Xld_to_transpose = cuda_Xld_true_A
+                cuda_Xld_temp_Xld.set_async(Xld_to_transpose, stream=self.stream_minMax)
+                self.compiled_X_to_transpose.get_function("kernel_X_to_transpose")(Xld_to_transpose, cuda_Xld_T_temp_lvl1_maxs, np.uint32(self.N), np.uint32(self.Mld), block=(self.Kshapes_transpose.threads_per_block, 1, 1), grid=(self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size), stream=self.stream_minMax)
+                cuda_Xld_T_temp_lvl1_mins.set_async(cuda_Xld_T_temp_lvl1_maxs, stream=self.stream_minMax)
+
             elif gui_data_prep_phase == 1: # perform the min-max reduction on cuda_Xld_temp, & scale the data to [0, 1] with the results
-                self.scaling_of_points(cuda_Xld_temp)
+                self.scaling_of_points(cuda_Xld_temp_Xld, cuda_Xld_T_temp_lvl1_mins, cuda_Xld_T_temp_lvl1_maxs)
+                print("SCALING FINISHED")
+
             else: # copy cuda_Xld_temp to cpu_Xld_arr_on_smem, if the GUI is ready
                 gui_done = False
                 busy_copying__for_GUI = False
                 with points_rendering_finished.get_lock():
                     gui_done = points_rendering_finished.value
                 if gui_done:
-                    cuda_Xld_temp.get_async(stream=self.stream_minMax, ary=cpu_Xld_arr_on_smem)
+                    cuda_Xld_temp_Xld.get_async(stream=self.stream_minMax, ary=cpu_Xld_arr_on_smem)
                     busy_copying__for_GUI = True
             gui_data_prep_phase = (gui_data_prep_phase + 1) % 3
 
