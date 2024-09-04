@@ -7,7 +7,7 @@ from multiprocessing import shared_memory
 import moderngl as mgl
 import pyglet
 
-__TARGET_FPS__ = 20.0
+__TARGET_FPS__ = 120.0
 
 def gen_K_random_colours(K):
     n = K * 200
@@ -45,7 +45,9 @@ def determine_Y_colour(Y):
 
 class ModernGLWindow(pyglet.window.Window):
     def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, **kwargs):
-        super().__init__(**kwargs)
+        # config = pyglet.gl.Config(double_buffer=True, depth_size=24, sample_buffers=1, samples=4)
+        config = pyglet.gl.Config(double_buffer=True)
+        super().__init__(config=config,vsync=True, **kwargs)
 
         if(Mld != 2):
             raise ValueError("Gui not implemented for Mld != 2")
@@ -89,6 +91,7 @@ class ModernGLWindow(pyglet.window.Window):
         self.retrieve_and_prepare_data()
     
     def setup_shaders(self):
+        #TODO cool neon effects
         vertex_shader = '''
         #version 330
         in vec2 in_vert;
@@ -122,10 +125,11 @@ class ModernGLWindow(pyglet.window.Window):
         # notify the main process that the rendering is done
         with self.points_rendering_finished.get_lock():
             self.points_rendering_finished.value = True
-        print("drawing")
+        # print("drawing")
     
     def on_close(self):
-        self.vbo.release()
+        self.vbo_positions.release()
+        self.vbo_colors.release()
         self.vao.release()
         self.ctx.release()
         super().on_close()
