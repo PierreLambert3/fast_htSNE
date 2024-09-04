@@ -89,6 +89,7 @@ class VerticalSlider:
         self.handle_highlight.y = handle_y
         self.tiny_line.y = tiny_line_y
         self.label_value.y = tiny_line_y
+        self.label_value.text = str(self.value)
 
     def is_inside(self, x, y):
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height

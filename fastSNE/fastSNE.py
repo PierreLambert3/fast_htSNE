@@ -164,13 +164,20 @@ class fastSNE:
             self.stream_neigh_LD.synchronize()
             self.stream_grads.synchronize()
 
+            # update hyperparameters
+            self.kern_alpha  = kernel_alpha.value
+            self.perplexity  = perplexity.value
+            self.attrac_mult = attrac_mult.value
+            self.dist_metric = dist_metric.value
+            print("fastSNE: alpha=%.2f, perplexity=%.2f, attraction_multiplier=%.2f, dist_metric=%d" % (self.kern_alpha, self.perplexity, self.attrac_mult, self.dist_metric))
+
             # One iteration of the tSNE optimisation
             if isPhaseA:
                 self.one_iteration(cuda_Xld_true_A)
             else:
                 self.one_iteration(cuda_Xld_true_B)
             
-            # on phase A : write to A, read from B
+
 
             # GUI communication & preparation of the data for the GUI
             if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
