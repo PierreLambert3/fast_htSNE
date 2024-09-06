@@ -1,2 +1,1 @@
 This package requires pyCUDA, which itself requires the cuda toolkit.
-If you have CUDA installed and can compile and run cuda code but still cannot install pycuda, using "aptitude" helped me solve the issue (i had to run "sudo aptitude install build-essential python3-dev libboost-python-dev" before "pip install pycuda", and accept the downgrade of one package, as suggested by aptitude (so don't just press "y" when prompted by aptitude).

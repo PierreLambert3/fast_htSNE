@@ -128,7 +128,7 @@ class Button:
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
 
 class ModernGLWindow(pyglet.window.Window):
-    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, **kwargs):
+    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, **kwargs):
         # config = pyglet.gl.Config(double_buffer=True, depth_size=24, sample_buffers=1, samples=4)
         config = pyglet.gl.Config(double_buffer=True)
         super().__init__(config=config,vsync=True, **kwargs)
@@ -150,6 +150,7 @@ class ModernGLWindow(pyglet.window.Window):
         self.gui_closed   = gui_closed        # multiprocessing Value type
         self.points_ready_for_rendering = points_ready_for_rendering # multiprocessing Value type
         self.points_rendering_finished  = points_rendering_finished  # multiprocessing Value type
+        self.iteration = iteration # multiprocessing Value type
         # colours for each point, on CPU
         self.Y_colours = determine_Y_colour(cpu_Y) # size (N, 3), colour of each observation (removes an "if" in the render function)
         # Xld on CPU
@@ -189,6 +190,9 @@ class ModernGLWindow(pyglet.window.Window):
         self.slider_perplexity   = VerticalSlider(-0.9, 0.4, 0.05, 0.3, __MIN_PERPLEXITY__, __MAX_PERPLEXITY__, self.perplexity.value, window_width, window_height, "Perplexity")
         self.slider_kernel_alpha = VerticalSlider(0.85, 0.4, 0.05, 0.3, __MIN_KERNEL_ALPHA__, __MAX_KERNEL_ALPHA__, self.kernel_alpha.value, window_width, window_height, "Kernel alpha")
         self.slider_attrac_mult  = VerticalSlider(0.85, -0.2, 0.05, 0.3, __MIN_ATTRACTION_MULTIPLIER__, __MAX_ATTRACTION_MULTIPLIER__, self.attrac_mult.value, window_width, window_height, "Attraction")
+        # label containing the iteration number
+        self.label_iteration = pyglet.text.Label(f"Iteration: {self.iteration.value}", x=window_width - 10, y=window_height - 10, anchor_x='right', anchor_y='top', color=__AMBER_DARK__, font_size=12)
+
 
     def setup_shaders(self):
         #TODO cool neon effects
@@ -229,6 +233,8 @@ class ModernGLWindow(pyglet.window.Window):
         self.slider_kernel_alpha.draw()
         self.slider_attrac_mult.draw()
 
+        self.label_iteration.draw()
+
         # notify the main process that the rendering is done
         with self.points_rendering_finished.get_lock():
             self.points_rendering_finished.value = True
@@ -252,6 +258,7 @@ class ModernGLWindow(pyglet.window.Window):
         if points_ready:
             self.retrieve_and_prepare_data()
             self.redraw_now = True
+            self.label_iteration.text = f"Iteration: {self.iteration.value}"
 
     def on_mouse_press(self, x, y, button, modifiers):
         if button == pyglet.window.mouse.LEFT:
@@ -333,14 +340,14 @@ class ModernGLWindow(pyglet.window.Window):
             self.ctrl_held = False
 
 class FastSNE_gui:
-    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, window_w=640, window_h=480):
-        self.window = ModernGLWindow(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, width=window_w, height=window_h, caption='fastSNE')
+    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, window_w=640, window_h=480):
+        self.window = ModernGLWindow(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, width=window_w, height=window_h, caption='fastSNE')
         pyglet.clock.schedule_interval(self.window.update, 1.0/__TARGET_FPS__)
         pyglet.app.run() # blocks until the window is closed, everything is event-driven from there on
 
-def gui_worker(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished):
+def gui_worker(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration):
     # ipc for Xld_A and Xld_B
-    gui = FastSNE_gui(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, window_w=800, window_h=800)
+    gui = FastSNE_gui(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, window_w=800, window_h=800)
 
     # notify the main process that the GUI has been closed
     with gui_closed.get_lock():

@@ -116,3 +116,94 @@ __global__ void kernel_scale_X(float* X, float* mins, float* maxs, uint32_t N, u
     return;
 }
 """
+
+
+
+
+
+
+
+
+kernel_recompute_furthest_dists_euclidean = """
+__device__ __forceinline__ float squared_euclidean_distance(float* X_i, float* X_j, uint32_t M){
+    float dist = 0.0f;
+    for(uint32_t m = 0; m < M; m++){
+        float diff = X_i[m] - X_j[m];
+        dist += diff * diff;
+    }
+    return dist;
+}
+
+__global__ void kernel_recompute_furthest_dists_euclidean(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+    return;
+}
+
+"""
+
+
+kernel_recompute_furthest_dists_manhattan = """
+
+__device__ __forceinline__ float manhattan_distance(float* X_i, float* X_j, uint32_t M){
+    float dist = 0.0f;
+    for(uint32_t m = 0; m < M; m++){
+        float diff = X_i[m] - X_j[m];
+        dist += fabs(diff);
+    }
+    return dist;
+}
+
+__global__ void kernel_recompute_furthest_dists_manhattan(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+    return;
+}
+
+"""
+
+
+
+kernel_recompute_furthest_dists_cosine = """
+
+__device__ __forceinline__ float cosine_distance(float* X_i, float* X_j, uint32_t M){
+    float dot_product = 0.0f;
+    float norm_i      = 0.0f;
+    float norm_j      = 0.0f;
+    for(uint32_t m = 0; m < M; m++){
+        float mult_ij = X_i[m] * X_j[m];
+        float mult_ii = X_i[m] * X_i[m];
+        float mult_jj = X_j[m] * X_j[m];
+        dot_product = dot_product + mult_ij;
+        norm_i      = norm_i + mult_ii;
+        norm_j      = norm_j + mult_jj;
+    }
+    float denom = sqrtf(norm_i * norm_j) + 0.0000001f;
+    return 1.0f - dot_product / denom;
+}
+
+__global__ void kernel_recompute_furthest_dists_cosine(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+
+    return;
+}
+
+"""
+
+kernel_recompute_furthest_dists_custom = """
+__device__ __forceinline__ float custom_distance(float* X_i, float* X_j, uint32_t M){
+    float sum_diff = 0.0f;
+    float sum_sum  = 0.0000001f;
+    for(uint32_t m = 0; m < M; m++){
+        float adiff  = fabs(X_i[m] - X_j[m]);
+        float asum   = fabs(X_i[m] + X_j[m]);
+        sum_diff     = sum_diff + adiff;
+        sum_sum      = sum_sum + asum;
+    }
+    return sum_diff / sum_sum;
+}
+
+__global__ void kernel_recompute_furthest_dists_custom(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+    return;
+}
+
+"""
+
+
+
+
