@@ -1,7 +1,6 @@
 
 # gets the min and max value for each column of a 2D array of shape (M, N) (transposed X matrix)
 kernel_minMax_reduction = """
-// include for bool and uint32_t
 #include <stdint.h>
 #include <stdio.h>
 
@@ -122,26 +121,154 @@ __global__ void kernel_scale_X(float* X, float* mins, float* maxs, uint32_t N, u
 
 
 
+# IDEALLY: when computing distance, betw mem acces apptern would be to load Xj to smem, and then each thread computes for one m: contiguous accesses will be parallelised
+# downside : parallel reduction to get the euclidean, many many blocks (cost of the overhead? need to benchmark it)
+kernel_compute_all_LD_sqdists = """
+#include <stdint.h>
+#include <stdio.h>
 
+__device__ __forceinline__ void warpReduce1d_argmax_float(volatile float* vector, volatile float* float_perms, uint32_t i, uint32_t prev_len, uint32_t stride){
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1_mins = vector_mins[i];
+            float value2_mins = vector_mins[i + stride];
+            float value1_maxs = vector_maxs[i];
+            float value2_maxs = vector_maxs[i + stride];
+            vector_mins[i]    = fminf(value1_mins, value2_mins);
+            vector_maxs[i]    = fmaxf(value1_maxs, value2_maxs);
+        }
+    }
+}
 
-kernel_recompute_furthest_dists_euclidean = """
+__device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* float_perms, uint32_t n, uint32_t i){
+    __syncthreads();
+    uint32_t prev_len = 2u * n;
+    uint32_t stride   = n;
+    while(stride > 32u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1_mins = vector_mins[i];
+            float value2_mins = vector_mins[i + stride];
+            float value1_maxs = vector_maxs[i];
+            float value2_maxs = vector_maxs[i + stride];
+            vector_mins[i]    = fminf(value1_mins, value2_mins);
+            vector_maxs[i]    = fmaxf(value1_maxs, value2_maxs);
+        }
+        __syncthreads();
+    }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_minMax_float(vector_mins, vector_maxs, i, prev_len, stride);}
+    __syncthreads();
+}
+
 __device__ __forceinline__ float squared_euclidean_distance(float* X_i, float* X_j, uint32_t M){
     float dist = 0.0f;
     for(uint32_t m = 0; m < M; m++){
         float diff = X_i[m] - X_j[m];
-        dist += diff * diff;
+        float diffdiff = diff * diff;
+        dist = dist + diffdiff;
     }
     return dist;
 }
 
-__global__ void kernel_recompute_furthest_dists_euclidean(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+/*
+smem: < Xi0,  Xi1, Xi2, ...,  XiNobsPerThread, sqdist_0, sqdist_1, ... sqdist_K>
+*/
+__global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, uint32_t Kld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write){
+    extern __shared__ float smem_LD_sqdists[];
+    uint32_t obs_i_in_block = threadIdx.x;
+    uint32_t k              = threadIdx.y;
+    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
+        return;}
+    bool is_0_thread = (k == 0u);
+    uint32_t j = knn_LD_read[obs_i_global*Kld + k]; // <--------- SLOW (global memory read)
+
+    // --------  shared memory partition  --------
+    float* X_i                   = &smem_LD_sqdists[obs_i_in_block * Mld];
+    float* smem_dists            = &smem_LD_sqdists[blockDim.x * Mld + obs_i_in_block*Kld];
+    flaot* smem_floatIdxs_neighs = &smem_LD_sqdists[blockDim.x * Mld + blockDim.x*Kld + obs_i_in_block*Kld]; # it's okay
+
+    float* X_j = Xld_read[j * Mld];  // <--------- SLOW (global memory read)
+
+    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
+    // here, coalesced access save time
+    if(Kld >= Mld){
+    
+    }
+    // ugh, a loop to access global memory
+    else if(is_0_thread){
+        float* Xi_globalmem = &Xld_read[obs_i_global * Mld]; // <--------- SLOW (global memory read)
+        for(uint32_t m = 0; m < Mld; m++){
+            float Xi_m = Xi_globalmem[m];
+            X_i[m]     = Xi_m;
+        }
+    }
+    __syncthreads();  // sync for smem
+
+
+    
+
+    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
+    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mld);
+    smem_dists[k]  = sq_eucl;
+    smem_floatIdxs_neighs[k] = (float) j;
+
+    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
+    reduce1d_argmax_float(float* vector, float* float_perms, uint32_t n, uint32_t i) sdfsfdf
+
+    // --------  write dists and permd neighbours to global memory  --------
+    sq_eucl = smem_dists[k];
+    j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely changed j (during parallel reduction)
+    knn_LD_write[obs_i_global*Kld + k] = j;
+    sqdists_LD_write[obs_i_global*Kld + k] = sq_eucl;
+    if(is_0_thread){
+        farthest_dist_LD_write[i] = sq_eucl;
+    }
+    
+
+
+    if(Kld != blockDim.y){
+        printf("BIG PROBLKEM HERE");
+        smem_LD_sqdists[9887786678876678] = 749834.0f;
+    }
+    if(obs_i_global == 0u){
+        printf("i %u    k %u    i rel %u\\n", obs_i_global, k, obs_i_in_block);
+    }
+    if( obs_i_global == 0u){
+        printf("TODO: check if we can load all X_i and X_j at once instread of using loops \\n");
+    }
+    if( obs_i_global == 0u){
+        printf("TODO: use smem to pre fetch the next couple of Xj[m] values during dist computations (in the eucl loop) \\n");
+    }
+    
+    return;
+}
+"""
+
+kernel_compute_all_HD_sqdists_euclidean = """
+__device__ __forceinline__ float squared_euclidean_distance(float* X_i, float* X_j, uint32_t M){
+    float dist = 0.0f;
+    for(uint32_t m = 0; m < M; m++){
+        float diff = X_i[m] - X_j[m];
+        float diffdiff = diff * diff;
+        dist = dist + diffdiff;
+    }
+    return dist;
+}
+
+__global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
     return;
 }
 
 """
 
 
-kernel_recompute_furthest_dists_manhattan = """
+kernel_compute_all_HD_sqdists_manhattan = """
 
 __device__ __forceinline__ float manhattan_distance(float* X_i, float* X_j, uint32_t M){
     float dist = 0.0f;
@@ -152,7 +279,7 @@ __device__ __forceinline__ float manhattan_distance(float* X_i, float* X_j, uint
     return dist;
 }
 
-__global__ void kernel_recompute_furthest_dists_manhattan(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+__global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
     return;
 }
 
@@ -160,7 +287,7 @@ __global__ void kernel_recompute_furthest_dists_manhattan(float* X, float* furth
 
 
 
-kernel_recompute_furthest_dists_cosine = """
+kernel_compute_all_HD_sqdists_cosine = """
 
 __device__ __forceinline__ float cosine_distance(float* X_i, float* X_j, uint32_t M){
     float dot_product = 0.0f;
@@ -178,14 +305,14 @@ __device__ __forceinline__ float cosine_distance(float* X_i, float* X_j, uint32_
     return 1.0f - dot_product / denom;
 }
 
-__global__ void kernel_recompute_furthest_dists_cosine(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+__global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
 
     return;
 }
 
 """
 
-kernel_recompute_furthest_dists_custom = """
+kernel_compute_all_HD_sqdists_custom = """
 __device__ __forceinline__ float custom_distance(float* X_i, float* X_j, uint32_t M){
     float sum_diff = 0.0f;
     float sum_sum  = 0.0000001f;
@@ -198,7 +325,7 @@ __device__ __forceinline__ float custom_distance(float* X_i, float* X_j, uint32_
     return sum_diff / sum_sum;
 }
 
-__global__ void kernel_recompute_furthest_dists_custom(float* X, float* furthest_dists, uint32_t* neighbours, uint32_t N, uint32_t M){
+__global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
     return;
 }
 
