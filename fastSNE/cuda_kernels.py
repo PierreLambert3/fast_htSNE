@@ -1,8 +1,20 @@
-
-# gets the min and max value for each column of a 2D array of shape (M, N) (transposed X matrix)
-kernel_minMax_reduction = """
+all_the_cuda_code = """
 #include <stdint.h>
 #include <stdio.h>
+
+#define MAX_PERPLEXITY 80.0f
+#define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
+#define KLD       32u
+#define N_CAND_LD 32u
+#define N_CAND_HD 32u
+
+__global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kld, uint32_t* n_cand_ld, uint32_t* n_cand_hd){
+    *max_perplexity = MAX_PERPLEXITY;
+    *khd            = KHD;
+    *kld            = KLD;
+    *n_cand_ld      = N_CAND_LD;
+    *n_cand_hd      = N_CAND_HD;
+}
 
 __device__ __forceinline__ void warpReduce1d_minMax_float(volatile float* vector_mins, volatile float* vector_maxs, uint32_t i, uint32_t prev_len, uint32_t stride){
     while(stride > 1u){
@@ -72,9 +84,7 @@ __global__ void perform_minMax_reduction(float *vec2d_temp_mins, float* vec2d_te
     }
     return;
 }
-"""
 
-kernel_X_to_transpose = """
 __global__ void kernel_X_to_transpose(float* Xread, float* Xwrite, uint32_t N, uint32_t M){
     uint32_t obs_i    = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t var_i    = blockIdx.y;
@@ -84,11 +94,7 @@ __global__ void kernel_X_to_transpose(float* Xread, float* Xwrite, uint32_t N, u
     uint32_t out_i = var_i * N + obs_i;
     Xwrite[out_i] = value;
 }
-"""
 
-# mins and maxs are of shape (1, M)
-# X is not transposed: shape (N, M)
-kernel_scale_X = """
 __global__ void kernel_scale_X(float* X, float* mins, float* maxs, uint32_t N, uint32_t M){
     extern __shared__ float shared_memory_scaling[];
     uint32_t obs_i    = blockIdx.x * blockDim.x + threadIdx.x;
@@ -114,15 +120,70 @@ __global__ void kernel_scale_X(float* X, float* mins, float* maxs, uint32_t N, u
     X[obs_i*M + var_i] = scaled;
     return;
 }
-"""
 
 
 
 
 
-kernel_compute_all_LD_sqdists = """
-#include <stdint.h>
-#include <stdio.h>
+
+// ------------------------------------------------------------------------------------
+
+__device__ __forceinline__ float squared_euclidean_distance(float* X_i, float* X_j, uint32_t M){
+    float dist = 0.0f;
+    for(uint32_t m = 0; m < M; m++){
+        float diff = X_i[m] - X_j[m];
+        float diffdiff = diff * diff;
+        dist = dist + diffdiff;
+    }
+    return dist;
+}
+
+__device__ __forceinline__ float manhattan_distance(float* X_i, float* X_j, uint32_t M){
+    float dist = 0.0f;
+    for(uint32_t m = 0; m < M; m++){
+        float diff    = X_i[m] - X_j[m];
+        float absdiff = fabs(diff);
+        dist          = dist + absdiff;
+    }
+    return dist;
+}
+
+__device__ __forceinline__ float cosine_distance(float* X_i, float* X_j, uint32_t M){
+    float dot_product = 0.0f;
+    float norm_i      = 0.0f;
+    float norm_j      = 0.0f;
+    for(uint32_t m = 0; m < M; m++){
+        float xi = X_i[m];
+        float xj = X_j[m];
+        float mult_ij = xi * xj;
+        float mult_ii = xi * xi;
+        float mult_jj = xj * xj;
+        dot_product   = dot_product + mult_ij;
+        norm_i        = norm_i + mult_ii;
+        norm_j        = norm_j + mult_jj;
+    }
+    //float denom = sqrtf(norm_i * norm_j) + 1.0f/(65536.0f * 16.0f);
+    //return 1.0f - dot_product / denom;
+    float inv_denom = rsqrtf(norm_i * norm_j);
+    return 1.0f - dot_product * inv_denom;
+}
+
+__device__ __forceinline__ float custom_distance(float* X_i, float* X_j, uint32_t M){
+    float sum_diff = 0.0f;
+    float sum_sum  = 1.0f/(65536.0f * 16.0f);
+    for(uint32_t m = 0; m < M; m++){
+        float adiff  = fabs(X_i[m] - X_j[m]);
+        float asum   = fabs(X_i[m] + X_j[m]);
+        sum_diff     = sum_diff + adiff;
+        sum_sum      = sum_sum + asum;
+    }
+    return sum_diff / sum_sum;
+}
+
+
+// ------------------------------------------------------------------------------------
+
+
 
 __device__ __forceinline__ void warpReduce1d_argmax_float(volatile float* vector, volatile float* float_perms, uint32_t i, uint32_t prev_len, uint32_t stride){
     while(stride > 1u){
@@ -172,19 +233,6 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* floa
     __syncthreads();
 }
 
-__device__ __forceinline__ float squared_euclidean_distance(float* X_i, float* X_j, uint32_t M){
-    float dist = 0.0f;
-    for(uint32_t m = 0; m < M; m++){
-        float diff = X_i[m] - X_j[m];
-        float diffdiff = diff * diff;
-        dist = dist + diffdiff;
-    }
-    return dist;
-}
-
-/*
-smem: < Xi0,  Xi1, Xi2, ...,  XiNobsPerThread, sqdist_0, sqdist_1, ... sqdist_K>
-*/
 __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, uint32_t Kld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write){
     extern __shared__ float smem_LD_sqdists[];
     uint32_t obs_i_in_block = threadIdx.x;
@@ -254,81 +302,17 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, uint32_t Kld, f
     
     return;
 }
-"""
 
-kernel_compute_all_HD_sqdists_euclidean = """
-__device__ __forceinline__ float squared_euclidean_distance(float* X_i, float* X_j, uint32_t M){
-    float dist = 0.0f;
-    for(uint32_t m = 0; m < M; m++){
-        float diff = X_i[m] - X_j[m];
-        float diffdiff = diff * diff;
-        dist = dist + diffdiff;
-    }
-    return dist;
-}
 
 __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
     return;
 }
-
-"""
-
-
-kernel_compute_all_HD_sqdists_manhattan = """
-
-__device__ __forceinline__ float manhattan_distance(float* X_i, float* X_j, uint32_t M){
-    float dist = 0.0f;
-    for(uint32_t m = 0; m < M; m++){
-        float diff = X_i[m] - X_j[m];
-        dist += fabs(diff);
-    }
-    return dist;
-}
-
 __global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
     return;
 }
 
-"""
-
-
-
-kernel_compute_all_HD_sqdists_cosine = """
-
-__device__ __forceinline__ float cosine_distance(float* X_i, float* X_j, uint32_t M){
-    float dot_product = 0.0f;
-    float norm_i      = 0.0f;
-    float norm_j      = 0.0f;
-    for(uint32_t m = 0; m < M; m++){
-        float mult_ij = X_i[m] * X_j[m];
-        float mult_ii = X_i[m] * X_i[m];
-        float mult_jj = X_j[m] * X_j[m];
-        dot_product = dot_product + mult_ij;
-        norm_i      = norm_i + mult_ii;
-        norm_j      = norm_j + mult_jj;
-    }
-    float denom = sqrtf(norm_i * norm_j) + 0.0000001f;
-    return 1.0f - dot_product / denom;
-}
-
 __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
-
     return;
-}
-
-"""
-
-kernel_compute_all_HD_sqdists_custom = """
-__device__ __forceinline__ float custom_distance(float* X_i, float* X_j, uint32_t M){
-    float sum_diff = 0.0f;
-    float sum_sum  = 0.0000001f;
-    for(uint32_t m = 0; m < M; m++){
-        float adiff  = fabs(X_i[m] - X_j[m]);
-        float asum   = fabs(X_i[m] + X_j[m]);
-        sum_diff     = sum_diff + adiff;
-        sum_sum      = sum_sum + asum;
-    }
-    return sum_diff / sum_sum;
 }
 
 __global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
@@ -336,6 +320,9 @@ __global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, uint32_t
 }
 
 """
+
+
+
 
 
 

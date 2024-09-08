@@ -8,30 +8,26 @@ import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import pycuda.gpuarray as gpuarray
 
-from fastSNE.cuda_kernels import kernel_minMax_reduction, kernel_X_to_transpose, kernel_scale_X
-from fastSNE.cuda_kernels import kernel_compute_all_HD_sqdists_euclidean, kernel_compute_all_HD_sqdists_manhattan, kernel_compute_all_HD_sqdists_cosine, kernel_compute_all_HD_sqdists_custom
-from fastSNE.cuda_kernels import kernel_compute_all_LD_sqdists
+from fastSNE.cuda_kernels import all_the_cuda_code
 
-__MAX_PERPLEXITY__ = 80.0
+__MAX_PERPLEXITY__ = None
 __MIN_PERPLEXITY__ = 1.5
 __MAX_KERNEL_ALPHA__ = 100.0
 __MIN_KERNEL_ALPHA__ = 0.05
 __MAX_ATTRACTION_MULTIPLIER__ = 10.0
 __MIN_ATTRACTION_MULTIPLIER__ = 0.1
 
-__Khd__       = ((int(__MAX_PERPLEXITY__ * 3) // 32) + 1) * 32 # n neighbours in HD. Needs to be divisible by 32
-__Kld__       = 32  # n neighbours in LD. Needs to be divisible by 32
-__N_CAND_LD__ = 32  # number of candidate points during iterative neighbourhood estimation Needs to be divisible by 32
-__N_CAND_HD__ = 32  # Needs to be divisible by 32
+# __MAX_PERPLEXITY__ = 80.0
+__Khd__       = None
+__Kld__       = None
+__N_CAND_LD__ = None
+__N_CAND_HD__ = None
 
-
-
-'''
-ALL CONSTANTS IN CUDA INSTEAD OF PYTHON (and then read from python code)
-
-cuda: tout mettre dans un seul code pour eviter les doublons: 1 seule compilation
-ensuite pull les fonctions les unes pares les autres
-'''
+__MAX_PERPLEXITY__ = 80.0   testing en remttant ca 
+__Khd__ = 256   testing en remttant ca 
+__Kld__ = 32   testing en remttant ca 
+__N_CAND_LD__ = 32   testing en remttant ca 
+__N_CAND_HD__ = 32   testing en remttant ca 
 
 
 class Kernel_shapes:
@@ -106,8 +102,14 @@ class Kernel_shapes_2dBlocks:
         self.grid_x_size = n_blocks
         self.grid_y_size = 1
 
-class fastSNE:
+class fastSNE:    
+
     def __init__(self, with_GUI, n_components=2, random_state=None):
+        # compiling the cuda code
+        compiler_options = ["-O3", "--use_fast_math", "-prec-div=false", "-ftz=true", "-prec-sqrt=false", "-fmad=true"] # safe arithmetics are for the weak
+        self.compiled_cuda_code = SourceModule(all_the_cuda_code, options=compiler_options)
+        # fetch the cuda-defined constants! (defined in cuda for better compilation optimisations)
+        self.fetch_constants_from_cuda()
         # state variables
         self.with_GUI     = with_GUI
         self.is_fitted    = False
@@ -276,6 +278,8 @@ class fastSNE:
             else:
                 self.one_iteration(cuda_Xld_true_B)
 
+            print("ALL CONSTANTS IN CUDA INSTEAD OF PYTHON (and then read from python code)")
+
             # GUI communication & preparation of the data for the GUI
             if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
                 # if we were copying the data for the GUI, notify the GUI that the data is ready
@@ -288,7 +292,7 @@ class fastSNE:
                 # copy the fresh data to cuda_Xld_temp as a transposed matrix
                 Xld_to_transpose = cuda_Xld_true_B if isPhaseA else cuda_Xld_true_A
                 cuda_Xld_temp_Xld.set_async(Xld_to_transpose, stream=stream_minMax)
-                self.compiled_X_to_transpose.get_function("kernel_X_to_transpose")(Xld_to_transpose, cuda_Xld_T_temp_lvl1_maxs, np.uint32(self.N), np.uint32(self.Mld), block=(self.Kshapes_transpose.threads_per_block, 1, 1), grid=(self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size), stream=stream_minMax)
+                self.X_to_transpose_cu(Xld_to_transpose, cuda_Xld_T_temp_lvl1_maxs, np.uint32(self.N), np.uint32(self.Mld), block=(self.Kshapes_transpose.threads_per_block, 1, 1), grid=(self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size), stream=stream_minMax)
                 cuda_Xld_T_temp_lvl1_mins.set_async(cuda_Xld_T_temp_lvl1_maxs, stream=stream_minMax)
             elif gui_data_prep_phase == 1: # perform the min-max reduction on cuda_Xld_temp, & scale the data to [0, 1] with the results
                 self.scaling_of_points(cuda_Xld_temp_Xld, cuda_Xld_T_temp_lvl1_mins, cuda_Xld_T_temp_lvl1_maxs, stream_minMax)
@@ -319,7 +323,7 @@ class fastSNE:
         1/0
 
     def scaling_of_points(self, cuda_Xld_temp_Xld, cuda_Xld_temp_lvl1_mins, cuda_Xld_temp_lvl1_maxs, stream_minMax):
-        cuda_kernel = self.compiled_minMax_reduction.get_function("perform_minMax_reduction")
+        cuda_kernel = self.min_max_reduction_cu
         stream      = stream_minMax
         # level 1 reduction (special case because we don't want to write on the cuda_Xld_temp_Xld)
         block_size  = self.Kshapes_minMax_lvl_1.threads_per_block
@@ -336,7 +340,7 @@ class fastSNE:
             block_size = self.Kshapes_transpose.threads_per_block
             grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
             smem_n_bytes = block_size * 4
-            self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+            self.scaling_X_cu(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
             return
         block_size  = self.Kshapes_minMax_lvl_2.threads_per_block
         grid_shape  = (self.Kshapes_minMax_lvl_2.grid_x_size, self.Kshapes_minMax_lvl_2.grid_y_size)
@@ -352,7 +356,7 @@ class fastSNE:
             block_size = self.Kshapes_transpose.threads_per_block
             grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
             smem_n_bytes = block_size * 4
-            self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+            self.scaling_X_cu(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
             return
         block_size  = self.Kshapes_minMax_lvl_3.threads_per_block
         grid_shape  = (self.Kshapes_minMax_lvl_3.grid_x_size, self.Kshapes_minMax_lvl_3.grid_y_size)
@@ -368,7 +372,7 @@ class fastSNE:
             block_size = self.Kshapes_transpose.threads_per_block
             grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
             smem_n_bytes = block_size * 4
-            self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+            self.scaling_X_cu(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
             return
         block_size  = self.Kshapes_minMax_lvl_4.threads_per_block
         grid_shape  = (self.Kshapes_minMax_lvl_4.grid_x_size, self.Kshapes_minMax_lvl_4.grid_y_size)
@@ -383,31 +387,29 @@ class fastSNE:
         block_size = self.Kshapes_transpose.threads_per_block
         grid_shape = (self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size)
         smem_n_bytes = block_size * 4
-        self.compiled_scaling_X.get_function("kernel_scale_X")(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        self.scaling_X_cu(cuda_Xld_temp_Xld, mins, maxs, np.uint32(self.N), np.uint32(self.Mld), block=(block_size, 1, 1), grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
 
     def fill_all_sqdists_HD(self, Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, stream):
-        dist_type = self.dist_metric
         kernel = None 
-        if dist_type == 0:
-            kernel = self.kernel_all_HD_sqdists_euclidean
-        elif dist_type == 1:
-            kernel = self.kernel_all_HD_sqdists_manhattan
-        elif dist_type == 2:
-            kernel = self.kernel_all_HD_sqdists_cosine
+        if self.dist_metric == 0:
+            kernel = self.all_HD_sqdists_euclidean_cu
+        elif self.dist_metric == 1:
+            kernel = self.all_HD_sqdists_manhattan_cu
+        elif self.dist_metric == 2:
+            kernel = self.all_HD_sqdists_cosine_cu
         else:
-            kernel = self.kernel_all_HD_sqdists_custom
+            kernel = self.all_HD_sqdists_custom_cu
         block_shape  = self.Kshapes2d_NxKhd_threads.block_x, self.Kshapes2d_NxKhd_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKhd_threads.grid_x_size, self.Kshapes2d_NxKhd_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKhd_threads.smem_n_bytes_per_block
         kernel(np.uint32(self.N), np.uint32(self.Mhd), np.uint32(__Khd__), Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
     def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, stream):
-        kernel = self.kernel_all_LD_sqdists
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
-        kernel(np.uint32(self.N), np.uint32(self.Mld), np.uint32(__Kld__), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), np.uint32(__Kld__), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
         print("carefull when checking: I write to an array and read from another")
 
@@ -527,16 +529,15 @@ class fastSNE:
         # ------------ 3. kernels used for the tSNE gradients -------   
 
 
-        # ------------ 4. Compiling the CUDA kernels -------
-        compiler_options = ["-O3", "--use_fast_math", "-prec-div=false", "-ftz=true", "-prec-sqrt=false", "-fmad=true"] # safe arithmetics are for the weak
-        self.compiled_minMax_reduction = SourceModule(kernel_minMax_reduction, options=compiler_options)
-        self.compiled_X_to_transpose   = SourceModule(kernel_X_to_transpose, options=compiler_options)
-        self.compiled_scaling_X        = SourceModule(kernel_scale_X, options=compiler_options)
-        self.kernel_all_HD_sqdists_euclidean = SourceModule(kernel_compute_all_HD_sqdists_euclidean, options=compiler_options).get_function("compute_all_HD_sqdists_euclidean")
-        self.kernel_all_HD_sqdists_manhattan = SourceModule(kernel_compute_all_HD_sqdists_manhattan, options=compiler_options).get_function("compute_all_HD_sqdists_manhattan")
-        self.kernel_all_HD_sqdists_cosine    = SourceModule(kernel_compute_all_HD_sqdists_cosine, options=compiler_options).get_function("compute_all_HD_sqdists_cosine")
-        self.kernel_all_HD_sqdists_custom    = SourceModule(kernel_compute_all_HD_sqdists_custom, options=compiler_options).get_function("compute_all_HD_sqdists_custom")
-        self.kernel_all_LD_sqdists = SourceModule(kernel_compute_all_LD_sqdists, options=compiler_options).get_function("compute_all_LD_sqdists")
+        # ------------ 4. fetching the CUDA kernels -------
+        self.min_max_reduction_cu  = self.compiled_cuda_code.get_function("perform_minMax_reduction")
+        self.X_to_transpose_cu     = self.compiled_cuda_code.get_function("kernel_X_to_transpose")
+        self.scaling_X_cu          = self.compiled_cuda_code.get_function("kernel_scale_X")
+        self.all_HD_sqdists_euclidean_cu = self.compiled_cuda_code.get_function("compute_all_HD_sqdists_euclidean")
+        self.all_HD_sqdists_manhattan_cu = self.compiled_cuda_code.get_function("compute_all_HD_sqdists_manhattan")
+        self.all_HD_sqdists_cosine_cu    = self.compiled_cuda_code.get_function("compute_all_HD_sqdists_cosine")
+        self.all_HD_sqdists_custom_cu    = self.compiled_cuda_code.get_function("compute_all_HD_sqdists_custom")
+        self.all_LD_sqdists_cu           = self.compiled_cuda_code.get_function("compute_all_LD_sqdists")
 
     def free_all_GPU_memory(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # cuda_context.pop() # not needed if pycuda.autoinit is used
@@ -546,4 +547,40 @@ class fastSNE:
         cuda_Xld_nest.gpudata.free()
         cuda_Xld_mmtm.gpudata.free()
         raise Exception("here need to free all CUDA ressources!!")
-        1/0
+
+    def fetch_constants_from_cuda(self):
+        global __MAX_PERPLEXITY__, __Khd__, __Kld__, __N_CAND_LD__, __N_CAND_HD__
+        # cuda: get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kld, uint32_t* n_cand_ld, uint32_t* n_cand_hd)
+        # Allocate memory on the GPU for the constants
+        max_perplexity_gpu = cuda.mem_alloc(np.float32().nbytes)
+        khd_gpu = cuda.mem_alloc(np.uint32().nbytes)
+        kld_gpu = cuda.mem_alloc(np.uint32().nbytes)
+        n_cand_ld_gpu = cuda.mem_alloc(np.uint32().nbytes)
+        n_cand_hd_gpu = cuda.mem_alloc(np.uint32().nbytes)
+        # fetch data on GPU
+        self.compiled_cuda_code.get_function("get_constants")(max_perplexity_gpu, khd_gpu, kld_gpu, n_cand_ld_gpu, n_cand_hd_gpu, block=(1, 1, 1), grid=(1, 1))
+        cuda.Context.synchronize()
+        max_perplexity = np.empty(1, dtype=np.float32)
+        khd = np.empty(1, dtype=np.uint32)
+        kld = np.empty(1, dtype=np.uint32)
+        n_cand_ld = np.empty(1, dtype=np.uint32)
+        n_cand_hd = np.empty(1, dtype=np.uint32)
+        # Copy the values from the GPU to the CPU
+        cuda.memcpy_dtoh(max_perplexity, max_perplexity_gpu)
+        cuda.memcpy_dtoh(khd, khd_gpu)
+        cuda.memcpy_dtoh(kld, kld_gpu)
+        cuda.memcpy_dtoh(n_cand_ld, n_cand_ld_gpu)
+        cuda.memcpy_dtoh(n_cand_hd, n_cand_hd_gpu)
+        # Free the memory on the GPU
+        max_perplexity_gpu.free()
+        khd_gpu.free()
+        kld_gpu.free()
+        n_cand_ld_gpu.free()
+        n_cand_hd_gpu.free()
+        # save to "constants" on cpu
+        """ __MAX_PERPLEXITY__ = float(max_perplexity[0])
+        __Khd__ = int(khd[0])
+        __Kld__ = int(kld[0])
+        __N_CAND_LD__ = int(n_cand_ld[0])
+        __N_CAND_HD__ = int(n_cand_hd[0]) """
+        remettre ca , mais ca foire pour le moment quand je le remts
