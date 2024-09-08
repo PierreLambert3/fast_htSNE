@@ -120,9 +120,6 @@ __global__ void kernel_scale_X(float* X, float* mins, float* maxs, uint32_t N, u
 
 
 
-
-# IDEALLY: when computing distance, betw mem acces apptern would be to load Xj to smem, and then each thread computes for one m: contiguous accesses will be parallelised
-# downside : parallel reduction to get the euclidean, many many blocks (cost of the overhead? need to benchmark it)
 kernel_compute_all_LD_sqdists = """
 #include <stdint.h>
 #include <stdio.h>
@@ -132,12 +129,17 @@ __device__ __forceinline__ void warpReduce1d_argmax_float(volatile float* vector
         prev_len = stride;
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
-            float value1_mins = vector_mins[i];
-            float value2_mins = vector_mins[i + stride];
-            float value1_maxs = vector_maxs[i];
-            float value2_maxs = vector_maxs[i + stride];
-            vector_mins[i]    = fminf(value1_mins, value2_mins);
-            vector_maxs[i]    = fmaxf(value1_maxs, value2_maxs);
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            bool should_swap = value1 < value2;
+            if(should_swap){
+                vector[i]               = value2;
+                vector[i + stride]      = value1;
+                float j1                = float_perms[i];
+                float j2                = float_perms[i + stride];
+                float_perms[i]          = j2;
+                float_perms[i + stride] = j1;
+            }
         }
     }
 }
@@ -150,18 +152,23 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* floa
         prev_len = stride;
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
-            float value1_mins = vector_mins[i];
-            float value2_mins = vector_mins[i + stride];
-            float value1_maxs = vector_maxs[i];
-            float value2_maxs = vector_maxs[i + stride];
-            vector_mins[i]    = fminf(value1_mins, value2_mins);
-            vector_maxs[i]    = fmaxf(value1_maxs, value2_maxs);
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            bool should_swap = value1 < value2;
+            if(should_swap){
+                float j1  = float_perms[i];
+                float j2  = float_perms[i + stride];
+                vector[i] = value2;
+                vector[i + stride] = value1;
+                float_perms[i] = j2;
+                float_perms[i + stride] = j1;
+            }
         }
         __syncthreads();
     }
     // one warp remaining: no need to sync anymore
     if(i + stride < prev_len){
-        warpReduce1d_minMax_float(vector_mins, vector_maxs, i, prev_len, stride);}
+        warpReduce1d_argmax_float(vector, float_perms, i, prev_len, stride);}
     __syncthreads();
 }
 
@@ -191,43 +198,42 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, uint32_t Kld, f
     // --------  shared memory partition  --------
     float* X_i                   = &smem_LD_sqdists[obs_i_in_block * Mld];
     float* smem_dists            = &smem_LD_sqdists[blockDim.x * Mld + obs_i_in_block*Kld];
-    flaot* smem_floatIdxs_neighs = &smem_LD_sqdists[blockDim.x * Mld + blockDim.x*Kld + obs_i_in_block*Kld]; # it's okay
-
-    float* X_j = Xld_read[j * Mld];  // <--------- SLOW (global memory read)
+    float* smem_floatIdxs_neighs = &smem_LD_sqdists[blockDim.x * Mld + blockDim.x*Kld + obs_i_in_block*Kld]; // it's okay
 
     // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
-    // here, coalesced access save time
-    if(Kld >= Mld){
-    
+    if(Kld >= Mld){ //  coalesced access to global memory: nice
+        if(k < Mld){
+            float Xi_m = Xld_read[obs_i_global * Mld + k]; // <--------- SLOW (global memory read)
+            X_i[k]     = Xi_m;
+        }
     }
-    // ugh, a loop to access global memory
-    else if(is_0_thread){
-        float* Xi_globalmem = &Xld_read[obs_i_global * Mld]; // <--------- SLOW (global memory read)
-        for(uint32_t m = 0; m < Mld; m++){
-            float Xi_m = Xi_globalmem[m];
-            X_i[m]     = Xi_m;
+    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
+        if(is_0_thread){
+            float* Xi_globalmem = &Xld_read[obs_i_global * Mld]; // <--------- SLOW (global memory read)
+            for(uint32_t m = 0; m < Mld; m++){
+                float Xi_m = Xi_globalmem[m];
+                X_i[m]     = Xi_m;
+            }
         }
     }
     __syncthreads();  // sync for smem
 
-
-    
-
     // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
+    float* X_j     = &Xld_read[j * Mld];  // compute the global memory address of Xj
     float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mld);
     smem_dists[k]  = sq_eucl;
     smem_floatIdxs_neighs[k] = (float) j;
 
     // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
-    reduce1d_argmax_float(float* vector, float* float_perms, uint32_t n, uint32_t i) sdfsfdf
+    reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, Kld, k);
 
-    // --------  write dists and permd neighbours to global memory  --------
+    // --------  write dists and neigbours to global memory  --------
     sq_eucl = smem_dists[k];
-    j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely changed j (during parallel reduction)
+    j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely different j (during parallel reduction)
     knn_LD_write[obs_i_global*Kld + k] = j;
     sqdists_LD_write[obs_i_global*Kld + k] = sq_eucl;
-    if(is_0_thread){
-        farthest_dist_LD_write[i] = sq_eucl;
+    if(is_0_thread){ // k=0 contains the furthest dist after // reduction
+        farthest_dist_LD_write[obs_i_global] = sq_eucl;
     }
     
 

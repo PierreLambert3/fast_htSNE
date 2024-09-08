@@ -14,8 +14,6 @@ __TARGET_FPS__  = 120.0
 __AMBER_LIGHT__ = (255, 191, 0)
 __AMBER_DARK__  = (70, 35, 0)
 
-
-
 def gen_K_random_colours(K):
     n = K * 200
     dataset = np.random.uniform(0, 1, (n, 3))

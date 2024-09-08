@@ -20,9 +20,19 @@ __MAX_ATTRACTION_MULTIPLIER__ = 10.0
 __MIN_ATTRACTION_MULTIPLIER__ = 0.1
 
 __Khd__       = ((int(__MAX_PERPLEXITY__ * 3) // 32) + 1) * 32 # n neighbours in HD. Needs to be divisible by 32
-__Kld__       = 32 # n neighbours in LD. Needs to be divisible by 32
-__N_CAND_LD__ = 32 # number of candidate points during iterative neighbourhood estimation Needs to be divisible by 32
-__N_CAND_HD__ = 32 # Needs to be divisible by 32
+__Kld__       = 32  # n neighbours in LD. Needs to be divisible by 32
+__N_CAND_LD__ = 32  # number of candidate points during iterative neighbourhood estimation Needs to be divisible by 32
+__N_CAND_HD__ = 32  # Needs to be divisible by 32
+
+
+
+'''
+ALL CONSTANTS IN CUDA INSTEAD OF PYTHON (and then read from python code)
+
+cuda: tout mettre dans un seul code pour eviter les doublons: 1 seule compilation
+ensuite pull les fonctions les unes pares les autres
+'''
+
 
 class Kernel_shapes:
     def __init__(self, N_threads_total, threads_per_block_multiple_of, smem_n_float32_per_thread, cuda_device_attributes, constant_additional_smem_n_float32):
@@ -108,6 +118,8 @@ class fastSNE:
         self.N            = None
         self.Mhd          = None
         self.Mld          = n_components
+        if self.Mld > __Kld__:
+            print("\033[38;2;255;165;0mWARNING\033[0m:  n_components is larger than the number of neighbours in LD (the constant __Kld__ in fastSNE.py). This will result in very inefficient memory access patterns, increasing __Kld__ might be worthwile. (but make sure __Kld__ is a multiple of 32, for efficiency reasons (see CUDA warps if you're curious why))")
         assert self.Mld >= 2
         self.kern_alpha   = np.float32(1.0)
         self.perplexity   = np.float32(5.0)
@@ -388,14 +400,14 @@ class fastSNE:
         block_shape  = self.Kshapes2d_NxKhd_threads.block_x, self.Kshapes2d_NxKhd_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKhd_threads.grid_x_size, self.Kshapes2d_NxKhd_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKhd_threads.smem_n_bytes_per_block
-        kernel(np.uint32(self.N), np.uint32(self.Mhd), np.uint32_t(__Khd__), Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        kernel(np.uint32(self.N), np.uint32(self.Mhd), np.uint32(__Khd__), Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
     def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, stream):
         kernel = self.kernel_all_LD_sqdists
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
-        kernel(np.uint32(self.N), np.uint32(self.Mld), np.uint32_t(__Kld__), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        kernel(np.uint32(self.N), np.uint32(self.Mld), np.uint32(__Kld__), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
         print("carefull when checking: I write to an array and read from another")
 
