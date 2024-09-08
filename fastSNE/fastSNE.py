@@ -10,24 +10,19 @@ import pycuda.gpuarray as gpuarray
 
 from fastSNE.cuda_kernels import all_the_cuda_code
 
-__MAX_PERPLEXITY__ = None
 __MIN_PERPLEXITY__ = 1.5
 __MAX_KERNEL_ALPHA__ = 100.0
 __MIN_KERNEL_ALPHA__ = 0.05
 __MAX_ATTRACTION_MULTIPLIER__ = 10.0
 __MIN_ATTRACTION_MULTIPLIER__ = 0.1
 
-# __MAX_PERPLEXITY__ = 80.0
+# these are defined in the compiled side of the project (in cuda_kernels.py)
+__MAX_PERPLEXITY__ = None
 __Khd__       = None
 __Kld__       = None
 __N_CAND_LD__ = None
 __N_CAND_HD__ = None
 
-__MAX_PERPLEXITY__ = 80.0   testing en remttant ca 
-__Khd__ = 256   testing en remttant ca 
-__Kld__ = 32   testing en remttant ca 
-__N_CAND_LD__ = 32   testing en remttant ca 
-__N_CAND_HD__ = 32   testing en remttant ca 
 
 
 class Kernel_shapes:
@@ -110,6 +105,15 @@ class fastSNE:
         self.compiled_cuda_code = SourceModule(all_the_cuda_code, options=compiler_options)
         # fetch the cuda-defined constants! (defined in cuda for better compilation optimisations)
         self.fetch_constants_from_cuda()
+
+        print("max perplexity and its type : ", __MAX_PERPLEXITY__, type(__MAX_PERPLEXITY__))
+        print("min perplexity and its type : ", __MIN_PERPLEXITY__, type(__MIN_PERPLEXITY__))
+        print("max perplexity and its type : ", __Khd__, type(__Khd__))
+        print("min perplexity and its type : ", __Kld__, type(__Kld__))
+        print("max perplexity and its type : ", __N_CAND_HD__, type(__N_CAND_HD__))
+        print("min perplexity and its type : ", __N_CAND_LD__, type(__N_CAND_LD__))
+        # 1/0
+
         # state variables
         self.with_GUI     = with_GUI
         self.is_fitted    = False
@@ -244,7 +248,7 @@ class fastSNE:
         points_rendering_finished  = multiprocessing.Value('b', True)
         iteration                  = multiprocessing.Value('i', 0)
         # 3.3  Launching the GUI process proper
-        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem, Y, self.N, self.Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration))
+        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem, Y, self.N, self.Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, __MIN_PERPLEXITY__, __MAX_PERPLEXITY__, __MIN_KERNEL_ALPHA__, __MAX_KERNEL_ALPHA__, __MIN_ATTRACTION_MULTIPLIER__, __MAX_ATTRACTION_MULTIPLIER__))
         process_gui.start()
 
         # 4.   Optimise until the GUI is closed
@@ -277,8 +281,6 @@ class fastSNE:
                 self.one_iteration(cuda_Xld_true_A)
             else:
                 self.one_iteration(cuda_Xld_true_B)
-
-            print("ALL CONSTANTS IN CUDA INSTEAD OF PYTHON (and then read from python code)")
 
             # GUI communication & preparation of the data for the GUI
             if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
@@ -578,9 +580,8 @@ class fastSNE:
         n_cand_ld_gpu.free()
         n_cand_hd_gpu.free()
         # save to "constants" on cpu
-        """ __MAX_PERPLEXITY__ = float(max_perplexity[0])
+        __MAX_PERPLEXITY__ = float(max_perplexity[0])
         __Khd__ = int(khd[0])
         __Kld__ = int(kld[0])
         __N_CAND_LD__ = int(n_cand_ld[0])
-        __N_CAND_HD__ = int(n_cand_hd[0]) """
-        remettre ca , mais ca foire pour le moment quand je le remts
+        __N_CAND_HD__ = int(n_cand_hd[0])
