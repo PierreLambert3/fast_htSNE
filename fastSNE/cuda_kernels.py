@@ -119,7 +119,7 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* floa
     __syncthreads();
     uint32_t prev_len = 2u * n;  
     uint32_t stride   = n;     
-    while(stride > 1u){
+    while(stride > 1u){ // no warpreduce here
         prev_len = stride; 
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
@@ -145,26 +145,23 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* floa
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  neighbour dists  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
-__global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, uint32_t Kld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write){
+__global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write){
     extern __shared__ float smem_LD_sqdists[];
     uint32_t obs_i_in_block = threadIdx.x;
     uint32_t k              = threadIdx.y;
     uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
     if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
         return;}
-    if(k >= Kld){
-        printf("\\n\\n\\n\\nError: k >= Kld\\n\\n\\n\\n");
-        return;}
     bool is_0_thread = (k == 0u);
-    uint32_t j = knn_LD_read[obs_i_global*Kld + k]; // <--------- SLOW (global memory read)
+    uint32_t j = knn_LD_read[obs_i_global*KLD + k]; // <--------- SLOW (global memory read)
 
     // --------  shared memory partition  --------
     float* X_i                   = &smem_LD_sqdists[obs_i_in_block * Mld];
-    float* smem_dists            = &smem_LD_sqdists[blockDim.x * Mld + obs_i_in_block*Kld];
-    float* smem_floatIdxs_neighs = &smem_LD_sqdists[blockDim.x * Mld + blockDim.x*Kld + obs_i_in_block*Kld]; // it's okay
+    float* smem_dists            = &smem_LD_sqdists[blockDim.x * Mld + obs_i_in_block*KLD];
+    float* smem_floatIdxs_neighs = &smem_LD_sqdists[blockDim.x * Mld + blockDim.x*KLD + obs_i_in_block*KLD]; // it's okay
 
     // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
-    if(Kld >= Mld){ //  coalesced access to global memory: nice
+    if(KLD >= Mld){ //  coalesced access to global memory: nice
         if(k < Mld){
             float Xi_m = Xld_read[obs_i_global * Mld + k]; // <--------- SLOW (global memory read)
             X_i[k]     = Xi_m;
@@ -188,32 +185,226 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, uint32_t Kld, f
     smem_floatIdxs_neighs[k] = (float) j;
     
     // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
-    reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, Kld, k);
+    reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KLD, k);
 
     // --------  write dists and neigbours to global memory  --------
     sq_eucl = smem_dists[k];
     j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely different j (during parallel reduction)
-    knn_LD_write[obs_i_global*Kld + k] = j;
-    sqdists_LD_write[obs_i_global*Kld + k] = sq_eucl;
-    if(is_0_thread){ // k=0 contains the furthest dist after // reduction
+    knn_LD_write[obs_i_global*KLD + k] = j;
+    sqdists_LD_write[obs_i_global*KLD + k] = sq_eucl;
+    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
         farthest_dist_LD_write[obs_i_global] = sq_eucl;
     }
-
     return;
 }
 
-__global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+__global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+    extern __shared__ float smem_HD_sqdists_euclidean[];
+    uint32_t obs_i_in_block = threadIdx.x;
+    uint32_t k              = threadIdx.y;
+    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
+        return;}
+    bool is_0_thread = (k == 0u);
+    uint32_t j = knn_HD_read[obs_i_global*KHD + k]; // <--------- SLOW (global memory read)
+
+    // --------  shared memory partition  --------
+    float* X_i                   = &smem_HD_sqdists_euclidean[obs_i_in_block * Mhd];
+    float* smem_dists            = &smem_HD_sqdists_euclidean[blockDim.x * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_euclidean[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+
+    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
+    if(KHD >= Mhd){ //  coalesced access to global memory: nice
+        if(k < Mhd){
+            float Xi_m = Xhd[obs_i_global * Mhd + k]; // <--------- SLOW (global memory read)
+            X_i[k]     = Xi_m;
+        }
+    }
+    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
+        if(is_0_thread){
+            float* Xi_globalmem = &Xhd[obs_i_global * Mhd]; // <--------- SLOW (global memory read)
+            for(uint32_t m = 0; m < Mhd; m++){
+                float Xi_m = Xi_globalmem[m];
+                X_i[m]     = Xi_m;
+            }
+        }
+    }
+    __syncthreads();  // sync for smem
+
+    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
+    float* X_j     = &Xhd[j * Mhd];  // compute the global memory address of Xj
+    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
+    smem_dists[k]  = sq_eucl;
+    smem_floatIdxs_neighs[k] = (float) j;
+    
+    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
+    reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KHD, k);
+
+    // --------  write dists and neigbours to global memory  --------
+    sq_eucl = smem_dists[k];
+    j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely different j (during parallel reduction)
+    knn_HD_write[obs_i_global*KHD + k] = j;
+    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
+    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
+        farthest_dist_HD_write[obs_i_global] = sq_eucl;
+    }
     return;
 }
-__global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+__global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+    extern __shared__ float smem_HD_sqdists_manhattan[];
+    uint32_t obs_i_in_block = threadIdx.x;
+    uint32_t k              = threadIdx.y;
+    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
+        return;}
+    bool is_0_thread = (k == 0u);
+    uint32_t j = knn_HD_read[obs_i_global*KHD + k]; // <--------- SLOW (global memory read)
+
+    // --------  shared memory partition  --------
+    float* X_i                   = &smem_HD_sqdists_manhattan[obs_i_in_block * Mhd];
+    float* smem_dists            = &smem_HD_sqdists_manhattan[blockDim.x * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_manhattan[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+
+    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
+    if(KHD >= Mhd){ //  coalesced access to global memory: nice
+        if(k < Mhd){
+            float Xi_m = Xhd[obs_i_global * Mhd + k]; // <--------- SLOW (global memory read)
+            X_i[k]     = Xi_m;
+        }
+    }
+    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
+        if(is_0_thread){
+            float* Xi_globalmem = &Xhd[obs_i_global * Mhd]; // <--------- SLOW (global memory read)
+            for(uint32_t m = 0; m < Mhd; m++){
+                float Xi_m = Xi_globalmem[m];
+                X_i[m]     = Xi_m;
+            }
+        }
+    }
+    __syncthreads();  // sync for smem
+
+    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
+    float* X_j     = &Xhd[j * Mhd];  // compute the global memory address of Xj
+    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
+    smem_dists[k]  = sq_eucl;
+    smem_floatIdxs_neighs[k] = (float) j;
+    
+    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
+    reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KHD, k);
+
+    // --------  write dists and neigbours to global memory  --------
+    sq_eucl = smem_dists[k];
+    j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely different j (during parallel reduction)
+    knn_HD_write[obs_i_global*KHD + k] = j;
+    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
+    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
+        farthest_dist_HD_write[obs_i_global] = sq_eucl;
+    }
+    return;
+}
+__global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+    extern __shared__ float smem_HD_sqdists_cosine[];
+    uint32_t obs_i_in_block = threadIdx.x;
+    uint32_t k              = threadIdx.y;
+    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
+        return;}
+    bool is_0_thread = (k == 0u);
+    uint32_t j = knn_HD_read[obs_i_global*KHD + k]; // <--------- SLOW (global memory read)
+
+    // --------  shared memory partition  --------
+    float* X_i                   = &smem_HD_sqdists_cosine[obs_i_in_block * Mhd];
+    float* smem_dists            = &smem_HD_sqdists_cosine[blockDim.x * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_cosine[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+
+    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
+    if(KHD >= Mhd){ //  coalesced access to global memory: nice
+        if(k < Mhd){
+            float Xi_m = Xhd[obs_i_global * Mhd + k]; // <--------- SLOW (global memory read)
+            X_i[k]     = Xi_m;
+        }
+    }
+    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
+        if(is_0_thread){
+            float* Xi_globalmem = &Xhd[obs_i_global * Mhd]; // <--------- SLOW (global memory read)
+            for(uint32_t m = 0; m < Mhd; m++){
+                float Xi_m = Xi_globalmem[m];
+                X_i[m]     = Xi_m;
+            }
+        }
+    }
+    __syncthreads();  // sync for smem
+
+    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
+    float* X_j     = &Xhd[j * Mhd];  // compute the global memory address of Xj
+    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
+    smem_dists[k]  = sq_eucl;
+    smem_floatIdxs_neighs[k] = (float) j;
+    
+    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
+    reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KHD, k);
+
+    // --------  write dists and neigbours to global memory  --------
+    sq_eucl = smem_dists[k];
+    j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely different j (during parallel reduction)
+    knn_HD_write[obs_i_global*KHD + k] = j;
+    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
+    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
+        farthest_dist_HD_write[obs_i_global] = sq_eucl;
+    }
     return;
 }
 
-__global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
-    return;
-}
+__global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+    extern __shared__ float smem_HD_sqdists_custom[];
+    uint32_t obs_i_in_block = threadIdx.x;
+    uint32_t k              = threadIdx.y;
+    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
+        return;}
+    bool is_0_thread = (k == 0u);
+    uint32_t j = knn_HD_read[obs_i_global*KHD + k]; // <--------- SLOW (global memory read)
 
-__global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, uint32_t Khd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+    // --------  shared memory partition  --------
+    float* X_i                   = &smem_HD_sqdists_custom[obs_i_in_block * Mhd];
+    float* smem_dists            = &smem_HD_sqdists_custom[blockDim.x * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_custom[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+
+    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
+    if(KHD >= Mhd){ //  coalesced access to global memory: nice
+        if(k < Mhd){
+            float Xi_m = Xhd[obs_i_global * Mhd + k]; // <--------- SLOW (global memory read)
+            X_i[k]     = Xi_m;
+        }
+    }
+    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
+        if(is_0_thread){
+            float* Xi_globalmem = &Xhd[obs_i_global * Mhd]; // <--------- SLOW (global memory read)
+            for(uint32_t m = 0; m < Mhd; m++){
+                float Xi_m = Xi_globalmem[m];
+                X_i[m]     = Xi_m;
+            }
+        }
+    }
+    __syncthreads();  // sync for smem
+
+    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
+    float* X_j     = &Xhd[j * Mhd];  // compute the global memory address of Xj
+    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
+    smem_dists[k]  = sq_eucl;
+    smem_floatIdxs_neighs[k] = (float) j;
+    
+    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
+    reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KHD, k);
+
+    // --------  write dists and neigbours to global memory  --------
+    sq_eucl = smem_dists[k];
+    j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely different j (during parallel reduction)
+    knn_HD_write[obs_i_global*KHD + k] = j;
+    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
+    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
+        farthest_dist_HD_write[obs_i_global] = sq_eucl;
+    }
     return;
 }
 
