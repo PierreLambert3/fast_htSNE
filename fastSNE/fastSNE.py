@@ -1,4 +1,5 @@
 import numpy as np
+np.set_printoptions(linewidth=200)
 import multiprocessing
 from multiprocessing import shared_memory
 
@@ -23,6 +24,51 @@ __Kld__       = None
 __N_CAND_LD__ = None
 __N_CAND_HD__ = None
 
+def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K, stream):
+    # sync stream
+    stream.synchronize()
+    cpu_X = np.zeros(shape=(N, M), dtype=np.float32)
+    cpu_neighbours        = np.zeros(shape=(N, K), dtype=np.uint32)
+    cpu_neighdists        = np.zeros(shape=(N, K), dtype=np.float32)
+    cpu_farthestdists = np.zeros(shape=(N,),   dtype=np.float32)
+    cpu_neighdists_recomputed = np.zeros(shape=(N, K), dtype=np.float32) # computed on CPU, should be equal to cpu_neighdists
+    # Copy data from GPU to CPU
+    cuda.memcpy_dtoh(cpu_X, cu_X.gpudata)
+    cuda.memcpy_dtoh(cpu_neighbours, cu_neighbours.gpudata)
+    cuda.memcpy_dtoh(cpu_neighdists, cu_neighdists.gpudata)
+    cuda.memcpy_dtoh(cpu_farthestdists, cu_farthests.gpudata)
+    # sync the device
+    cuda.Context.synchronize()
+
+    distances_match = True
+    farthests_match = True
+    for i in range(N):
+        # do_comparison = np.random.uniform() < 0.001
+        do_comparison = True
+        if(do_comparison):
+            # GPU values
+            dists_according_to_gpu    = cpu_neighdists[i]
+            farthest_according_to_gpu = cpu_farthestdists[i]
+            # recompute on CPU
+            X_i = cpu_X[i]
+            for k in range(K):
+                j    = cpu_neighbours[i, k]
+                X_j  = cpu_X[j]
+                diff = (X_i - X_j)
+                cpu_neighdists_recomputed[i, k] = np.sum(diff*diff)
+            farthest_according_to_cpu = np.max(cpu_neighdists_recomputed[i])
+
+            distances_all_close = np.allclose(cpu_neighdists_recomputed[i], cpu_neighdists[i], atol=1e-5)
+            farthest_ok         = (np.abs(farthest_according_to_cpu - farthest_according_to_gpu) < 1e-5)
+
+            if (not distances_all_close)  or (not farthest_ok):
+                print("i :", i)
+                print("GPU: ", np.round(dists_according_to_gpu, 2))
+                print("cpu: ", np.round(cpu_neighdists_recomputed[i], 2))
+                print("----  farthest dists     GPU : ", farthest_according_to_gpu, "CPU : ", farthest_according_to_cpu)
+                1/0
+    print("distances_match: ", distances_match)
+    print("farthests_match: ", farthests_match)
 
 
 class Kernel_shapes:
@@ -407,13 +453,17 @@ class fastSNE:
         smem_n_bytes = self.Kshapes2d_NxKhd_threads.smem_n_bytes_per_block
         kernel(np.uint32(self.N), np.uint32(self.Mhd), np.uint32(__Khd__), Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
+        # verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__)
+
     def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, stream):
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
         self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), np.uint32(__Kld__), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
 
-        print("carefull when checking: I write to an array and read from another")
+        verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream)
+
+        1/0
 
 
     def configue_and_initialise_CUDA_kernels_please(self, Khd, Kld, Mhd, Mld):
