@@ -441,7 +441,28 @@ class fastSNE:
     def fit_without_gui(self, big_dic):
         1/0
 
+    # all CUDA 'kernels' run in parallel, sync at the start of the iterations loop outside of this function
     def one_iteration(self, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write, farthest_dist_HD_read, farthest_dist_HD_write, candidate_dists_HD, knn_LD_read, knn_LD_write, sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, candidate_dists_LD, cuda_candidate_idx_LD, cuda_candidate_idx_HD, stream_neigh_HD, stream_neigh_LD, stream_grads):
+        # 0/ - gradient computations & update positions
+        
+        # 1/ - update LD neighbour distances
+        #    -  partial sort (descending because we deermine which is the furthest one)
+
+        # 2/  - find candidate neighbours for HD space, compute their distances
+        #     - partial sort (ascending this time: closeby = to the left)
+        #     - update knn_HD_write: fixed & fast insertion patterns (SYNCTHREADS BETWEEN EACH ONE!)
+        #     - keep track of i's that had a neighbour update (dont reset the flag: accumulate the changed flag across iterations)
+        
+        # 3/  - find candidate neighbours for LD space, compute their distances
+        #     - partial sort (ascending this time: closeby = to the left)
+        #     - update knn_LD_write: fixed & fast insertion patterns (SYNCTHREADS BETWEEN EACH ONE!)
+
+        # 4/  - parallel reduction sum on the number of i's that had a neighbour update in HD
+
+        # 5/  - if rand() < 0.02 + pct_HD_changed:
+        #     - for each i that has a 'HD neigh changed' flag activated (which is persistant across iterations):
+        #     - recompute radius and Pasym 
+        #     - reset 'HD neigh changed' flags
         return
 
     def scaling_of_points(self, cuda_Xld_temp_Xld, cuda_Xld_temp_lvl1_mins, cuda_Xld_temp_lvl1_maxs, stream_minMax):
