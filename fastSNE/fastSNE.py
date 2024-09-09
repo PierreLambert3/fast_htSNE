@@ -26,25 +26,30 @@ __N_CAND_HD__ = None
 
 def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K, stream):
     # sync stream
+    print("check0")
     stream.synchronize()
+    print("check0 - done")
     cpu_X = np.zeros(shape=(N, M), dtype=np.float32)
     cpu_neighbours        = np.zeros(shape=(N, K), dtype=np.uint32)
     cpu_neighdists        = np.zeros(shape=(N, K), dtype=np.float32)
     cpu_farthestdists = np.zeros(shape=(N,),   dtype=np.float32)
     cpu_neighdists_recomputed = np.zeros(shape=(N, K), dtype=np.float32) # computed on CPU, should be equal to cpu_neighdists
+    print("check1")
     # Copy data from GPU to CPU
     cuda.memcpy_dtoh(cpu_X, cu_X.gpudata)
     cuda.memcpy_dtoh(cpu_neighbours, cu_neighbours.gpudata)
     cuda.memcpy_dtoh(cpu_neighdists, cu_neighdists.gpudata)
     cuda.memcpy_dtoh(cpu_farthestdists, cu_farthests.gpudata)
+    print("check2")
     # sync the device
     cuda.Context.synchronize()
-
+    print("verifying loop")
     distances_match = True
     farthests_match = True
     for i in range(N):
-        # do_comparison = np.random.uniform() < 0.001
-        do_comparison = True
+        if(i % 100 == 0):
+            print("i: ", i)
+        do_comparison = np.random.uniform() < 0.01
         if(do_comparison):
             # GPU values
             dists_according_to_gpu    = cpu_neighdists[i]
@@ -154,10 +159,14 @@ class fastSNE:
 
         print("max perplexity and its type : ", __MAX_PERPLEXITY__, type(__MAX_PERPLEXITY__))
         print("min perplexity and its type : ", __MIN_PERPLEXITY__, type(__MIN_PERPLEXITY__))
-        print("max perplexity and its type : ", __Khd__, type(__Khd__))
-        print("min perplexity and its type : ", __Kld__, type(__Kld__))
-        print("max perplexity and its type : ", __N_CAND_HD__, type(__N_CAND_HD__))
-        print("min perplexity and its type : ", __N_CAND_LD__, type(__N_CAND_LD__))
+        print("__Khd__ : ", __Khd__, type(__Khd__))
+        print("__Kld__ : ", __Kld__, type(__Kld__))
+        print("__N_CAND_HD__ : ", __N_CAND_HD__, type(__N_CAND_HD__))
+        print("__N_CAND_LD__ : ", __N_CAND_LD__, type(__N_CAND_LD__))
+
+        if __Kld__ % 32 != 0:
+            print("\033[38;2;255;165;0mWARNING\033[0m:  __Kld__ is not a multiple of 32. This will result in inefficient memory access patterns. Consider changing the value of __Kld__ in fastSNE.py")
+
         # 1/0
 
         # state variables
@@ -460,7 +469,7 @@ class fastSNE:
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
         self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), np.uint32(__Kld__), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-
+        print("VERIFYING LD DISTANCES")
         verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream)
 
         1/0

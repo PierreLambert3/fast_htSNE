@@ -7,7 +7,6 @@ all_the_cuda_code = """
 // --------------------------------------------------------------------------------------------------
 #define MAX_PERPLEXITY (80.0f)
 #define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
-//#define KLD       (32u * 1u + 1u)
 #define KLD       (32u * 1u) 
 #define N_CAND_LD (32u)
 #define N_CAND_HD (32u)
@@ -114,88 +113,31 @@ __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float*
     if(i + stride < prev_len){
         warpReduce1d_minMax_float(vector_mins, vector_maxs, i, prev_len, stride);}
     __syncthreads();
-    printf("need to rework parallel reduction, cf problem when n is equal to warp size (32)\\n");
 }
 
-/*
-    this is okay : 
+__device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* float_perms, uint32_t n, uint32_t i){
+    __syncthreads();
+    uint32_t prev_len = 2u * n;  
+    uint32_t stride   = n;     
     while(stride > 1u){
-        prev_len = stride;
+        prev_len = stride; 
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
-            float value1 = vector[i];
-            float value2 = vector[i + stride];
-            bool should_swap = value1 < value2;
-            if(should_swap){
-                vector[i]               = value2;
-                vector[i + stride]      = value1;
-                __syncthreads(); 
-                float j1                = float_perms[i];
-                __syncthreads();
-                float j2                = float_perms[i + stride];
-                __syncthreads();
-                float_perms[i]          = j2;
-                __syncthreads();
-                float_perms[i + stride] = j1;
-            }
-        }
-    }
-    */
-
-__device__ __forceinline__ void warpReduce1d_argmax_float(volatile float* vector, volatile float* float_perms, uint32_t i, uint32_t prev_len, uint32_t stride){
-    while(stride > 1u){
-        prev_len = stride;
-        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
-        if(i + stride < prev_len){
-            /*float value1 = vector[i];
-              float value2 = vector[i + stride];
-              vector[i] = fmaxf(value1, value2); */
             float value1 = vector[i];
             float value2 = vector[i + stride];
             if(value1 < value2){
                 vector[i]               = value2;
                 vector[i + stride]      = value1;
-                float j1       = float_perms[i];
-                float j2       = float_perms[i + stride];
-                float_perms[i]          = j2;
-                float_perms[i + stride] = j1;
-            }
-            __syncthreads(); OK LE PROBLEME VENAIT DE LA: IL FAUT LE SYNTHREAD POUR LE IF 
-            ==> trouver solution sans if?
-        }
-    }
-}
-
-__device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* float_perms, uint32_t n, uint32_t i){
-    __syncthreads();
-    uint32_t prev_len = 2u * n;  // 32*2 = 64
-    uint32_t stride   = n;       // 32
-    /*
-    while(stride > 32u){
-    // while(stride > 1u){   //THIS IS OKAY: PROBLEM ONLY IF USING WARPREDUCE
-        prev_len = stride;       // 32
-        stride   = (uint32_t) ceilf((float)prev_len * 0.5f); // 16
-        if(i + stride < prev_len){
-            float value1 = vector[i];
-            float value2 = vector[i + stride];
-            bool should_swap = value1 < value2;
-            if(should_swap){
-                float j1  = float_perms[i];
-                float j2  = float_perms[i + stride];
-                vector[i] = value2;
-                vector[i + stride] = value1;
-                // float_perms[i] = j2;
-                // float_perms[i + stride] = j1;
+                // Swap the permutations
+                float temp = float_perms[i];
+                float_perms[i] = float_perms[i + stride];
+                float_perms[i + stride] = temp;
             }
         }
         __syncthreads();
-        printf("this part is not cvalled\\n");
     }
-    */
-    // one warp remaining: no need to sync anymore
-    if(i + stride < prev_len){
-        warpReduce1d_argmax_float(vector, float_perms, i, prev_len, stride);
-    }
+    // no warp reduce: the operation requires a syncthread() to be correct, because the warp is not guaranteed to be in lockstep (because of conditional and double write/read)
+    // always check your reductions with a small example to see if the results are correct. ALWAYS. 
     __syncthreads();
 }
 
