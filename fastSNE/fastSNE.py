@@ -1,5 +1,6 @@
 import numpy as np
 np.set_printoptions(linewidth=200)
+__MAX_INT32_T__ = (2**31) - 1
 import multiprocessing
 from multiprocessing import shared_memory
 
@@ -41,9 +42,14 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
     cuda.Context.synchronize()
     distances_match = True
     farthests_match = True
+    sortedness_short = 0.0
+    sortedness_far   = 0.0
+    n_votes_short    = 0
+    n_votes_far      = 0
     for i in range(N):
-        do_comparison = np.random.uniform() < 0.01
+        do_comparison = np.random.uniform() < 0.1
         if(do_comparison):
+            """ 
             # GPU values
             dists_according_to_gpu    = cpu_neighdists[i] / 10000000.0
             farthest_according_to_gpu = cpu_farthestdists[i] / 10000000.0
@@ -55,16 +61,62 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
                 diff = (X_i - X_j)
                 cpu_neighdists_recomputed[i, k] = np.sum(diff*diff) / 10000000.0
             farthest_according_to_cpu = np.max(cpu_neighdists_recomputed[i])
-
+            
             distances_all_close = np.allclose(cpu_neighdists_recomputed[i], cpu_neighdists[i], atol=1e-5)
             farthest_ok         = (np.abs(farthest_according_to_cpu - farthest_according_to_gpu) < 1e-5)
-
             if (not distances_all_close)  or (not farthest_ok):
+                print("distances_all_close: ", distances_all_close, "farthest_ok: ", farthest_ok)
                 print("i :", i)
-                print("GPU: ", np.round(dists_according_to_gpu, 2)[:32])
-                print("cpu: ", np.round(cpu_neighdists_recomputed[i], 2)[:32])
+                print("diff: ", np.round(dists_according_to_gpu-cpu_neighdists_recomputed[i], 4))
+                print("GPU: ", np.round(dists_according_to_gpu, 2))
+                print("cpu: ", np.round(cpu_neighdists_recomputed[i], 2))
                 print("----  farthest dists     GPU : ", farthest_according_to_gpu, "CPU : ", farthest_according_to_cpu)
-                1/0
+                1/0 
+            """
+
+            # check that each neighbour is unique
+            neighbours = cpu_neighbours[i]
+            for k1 in range(K):
+                j1 = neighbours[k1]
+                if j1 == i:
+                    raise Exception("neighbour is the point itself")
+                for k2 in range(k1+1, K):
+                    j2 = neighbours[k2]
+                    if j1 == j2:
+                        print(neighbours)
+                        print("same neighbours : ", j1, j2, " at indices : ", k1, k2)
+                        raise Exception("neighbours are not unique")
+            if(i > 50000):
+                break
+            # short sortedness
+            for k in range(K-1):
+                if cpu_neighdists[i, k] > cpu_neighdists[i, k+1]:
+                    sortedness_short += 1.0
+                else:
+                    sortedness_short += -1.0
+                n_votes_short += 1
+            # far sortedness
+            for k in range(K):
+                idx  = k 
+                idx2 = np.random.randint(0, K)
+                if idx == idx2:
+                    continue
+                if idx2 < idx:
+                    tmpi = idx2
+                    idx2 = idx 
+                    idx  = tmpi
+                if cpu_neighdists[i, idx] > cpu_neighdists[i, idx2]:
+                    sortedness_far += 1.0
+                else:
+                    sortedness_far += -1.0
+                n_votes_far += 1
+
+            
+    sortedness_far    /= n_votes_far
+    sortedness_short  /= n_votes_short
+    print("sortedness_far: ", sortedness_far)
+    print("sortedness_short: ", sortedness_short)
+    1/0
     print("distances_match: ", distances_match, "farthests_match: ", farthests_match)
 
 
@@ -148,8 +200,14 @@ class fastSNE:
         self.compiled_cuda_code = SourceModule(all_the_cuda_code, options=compiler_options)
         # fetch the cuda-defined constants! (defined in cuda for better compilation optimisations)
         self.fetch_constants_from_cuda()
-        if __Kld__ % 32 != 0:
+        if (__Kld__ % 32) != 0:
             print("\033[38;2;255;165;0mWARNING\033[0m:  __Kld__ is not a multiple of 32. This will result in inefficient memory access patterns. Consider changing the value of __Kld__ in fastSNE.py")
+        if (__Khd__ % 32) != 0:
+            print("\033[38;2;255;165;0mWARNING\033[0m:  __Khd__ is not a multiple of 32. This will result in inefficient memory access patterns. Consider changing the value of __Khd__ in fastSNE.py")
+        if (__Kld__ % 2) != 0:
+            raise Exception("__Kld__ has to be a multiple of 2 (and preferably a multiple of 32 as well). Change the value of __Kld__ in fastSNE.py")
+        if (__Khd__ % 2) != 0:
+            raise Exception("__Khd__ has to be a multiple of 2 (and preferably a multiple of 32 as well). Change the value of __Khd__ in fastSNE.py")
         # state variables
         self.with_GUI     = with_GUI
         self.is_fitted    = False
@@ -242,9 +300,6 @@ class fastSNE:
         self.fill_all_sqdists_LD(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, stream_neigh_LD)
         stream_neigh_HD.synchronize()
         stream_neigh_LD.synchronize()
-
-
-        
 
         big_dic = {
             "cuda_Xhd"                : cuda_Xhd,
@@ -349,6 +404,8 @@ class fastSNE:
         busy_copying__for_GUI = False
         gui_was_closed        = False
         while not gui_was_closed:
+            print("when inserting: parallel reduction on abs(cand_idx - neigh_idx) --> if min value is 0 then neighbour is already there")
+
             # sync all streams (else read/writes will conflict with versions A and B)
             stream_minMax.synchronize()
             stream_neigh_HD.synchronize()
@@ -545,15 +602,18 @@ class fastSNE:
         block_shape  = self.Kshapes2d_NxKhd_threads.block_x, self.Kshapes2d_NxKhd_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKhd_threads.grid_x_size, self.Kshapes2d_NxKhd_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKhd_threads.smem_n_bytes_per_block
-        kernel(np.uint32(self.N), np.uint32(self.Mhd), Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        seed = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3
+        
+        kernel(np.uint32(self.N), np.uint32(self.Mhd), Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         # verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream)
 
     def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, stream):
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
-        self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-        # verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream)
+        seed = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3
+        self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream)
 
     def configue_and_initialise_CUDA_kernels_please(self, Khd, Kld, Mhd, Mld):
         N = self.N

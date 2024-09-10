@@ -3,6 +3,16 @@ all_the_cuda_code = """
 #include <stdio.h>
 
 // --------------------------------------------------------------------------------------------------
+// -----------  a terrible chaotic function that should never be used  ------------------------------
+// --------------------------------------------------------------------------------------------------
+__device__ __forceinline__ uint32_t random_uint32_t_xorshift32(uint32_t* rand_state){
+    *rand_state ^= *rand_state << 13u;
+    *rand_state ^= *rand_state >> 17u;
+    *rand_state ^= *rand_state << 5u;
+    return *rand_state;
+}
+
+// --------------------------------------------------------------------------------------------------
 // ---------------------------------  compiler-visible constants  -----------------------------------
 // --------------------------------------------------------------------------------------------------
 #define MAX_PERPLEXITY (80.0f)
@@ -97,6 +107,7 @@ __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float*
     uint32_t prev_len = 2u * n;
     uint32_t stride   = n;
     while(stride > 32u){
+    //while(stride > 1u){
         prev_len = stride;
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
@@ -145,7 +156,7 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* floa
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  neighbour dists  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
-__global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write){
+__global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write, uint32_t seed){
     extern __shared__ float smem_LD_sqdists[];
     uint32_t obs_i_in_block = threadIdx.x;
     uint32_t k              = threadIdx.y;
@@ -183,22 +194,48 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
     float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mld);
     smem_dists[k]  = sq_eucl;
     smem_floatIdxs_neighs[k] = (float) j;
-    
+
     // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
     reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KLD, k);
-
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
-    HERE NEED TO DO A BETTER PARTIAL SORT OF THE LD DISTANCES (SWAP THEN REDUCE)
+    
+    // --------  sorting helper with  greedy swaps at non-overlapping indices (really fast) --------
+    // ------------------------ 1: between divisible by 2 and not divisible by 2 -------------------
+    __syncthreads();
+    if((k%2) == 0){ // 
+        uint32_t left  = k;
+        uint32_t right = ((seed + k/2) * 2u + 1u) % KLD; // seed MUST be assured to be significantly smaller than max_uint32_t else overflow is possible
+        if(left > right){
+            uint32_t tmpidx = right;
+            right = left;
+            left  = tmpidx;
+        }
+        float value1 = smem_dists[left];
+        float value2 = smem_dists[right];
+        if(value1 < value2){
+            smem_dists[left]  = value2;
+            smem_dists[right] = value1;
+            float temp = smem_floatIdxs_neighs[left];
+            smem_floatIdxs_neighs[left]  = smem_floatIdxs_neighs[right];
+            smem_floatIdxs_neighs[right] = temp;
+        }
+    }
+    __syncthreads();
+    random_uint32_t_xorshift32(&seed);
+    if((k % 2) == 0){
+        uint32_t left  = k;
+        uint32_t right = k+1;
+        float value1 = smem_dists[left];
+        float value2 = smem_dists[right];
+        if(value1 < value2){
+            smem_dists[left]  = value2;
+            smem_dists[right] = value1;
+            float temp = smem_floatIdxs_neighs[left];
+            smem_floatIdxs_neighs[left]  = smem_floatIdxs_neighs[right];
+            smem_floatIdxs_neighs[right] = temp;
+        }
+    }
+    __syncthreads();
+    
 
     // --------  write dists and neigbours to global memory  --------
     sq_eucl = smem_dists[k];
@@ -211,7 +248,7 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
     return;
 }
 
-__global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+__global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed_global){
     extern __shared__ float smem_HD_sqdists_euclidean[];
     uint32_t obs_i_in_block = threadIdx.x;
     uint32_t k              = threadIdx.y;
@@ -263,7 +300,7 @@ __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float
     }
     return;
 }
-__global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+__global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed_global){
     extern __shared__ float smem_HD_sqdists_manhattan[];
     uint32_t obs_i_in_block = threadIdx.x;
     uint32_t k              = threadIdx.y;
@@ -315,7 +352,7 @@ __global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float
     }
     return;
 }
-__global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+__global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed_global){
     extern __shared__ float smem_HD_sqdists_cosine[];
     uint32_t obs_i_in_block = threadIdx.x;
     uint32_t k              = threadIdx.y;
@@ -368,7 +405,7 @@ __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* X
     return;
 }
 
-__global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+__global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed_global){
     extern __shared__ float smem_HD_sqdists_custom[];
     uint32_t obs_i_in_block = threadIdx.x;
     uint32_t k              = threadIdx.y;
