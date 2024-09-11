@@ -3,16 +3,6 @@ all_the_cuda_code = """
 #include <stdio.h>
 
 // --------------------------------------------------------------------------------------------------
-// -----------  a terrible chaotic function that should never be used  ------------------------------
-// --------------------------------------------------------------------------------------------------
-__device__ __forceinline__ uint32_t random_uint32_t_xorshift32(uint32_t* rand_state){
-    *rand_state ^= *rand_state << 13u;
-    *rand_state ^= *rand_state >> 17u;
-    *rand_state ^= *rand_state << 5u;
-    return *rand_state;
-}
-
-// --------------------------------------------------------------------------------------------------
 // ---------------------------------  compiler-visible constants  -----------------------------------
 // --------------------------------------------------------------------------------------------------
 #define MAX_PERPLEXITY (80.0f)
@@ -27,6 +17,17 @@ __global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kl
     *kld            = KLD;
     *n_cand_ld      = N_CAND_LD;
     *n_cand_hd      = N_CAND_HD;
+}
+
+// --------------------------------------------------------------------------------------------------
+// -----------  a terrible chaotic function that should never be used  ------------------------------
+// --------------------------------------------------------------------------------------------------
+// the rand_state SHOULD NEVER BE ZERO, and it's better to have it use all the 32 bits (ie: dont seed it with small values)
+__device__ __forceinline__ uint32_t random_uint32_t_xorshift32(uint32_t* rand_state){
+    *rand_state ^= *rand_state << 13u;
+    *rand_state ^= *rand_state >> 17u;
+    *rand_state ^= *rand_state << 5u;
+    return *rand_state;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -194,6 +195,7 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
     float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mld);
     smem_dists[k]  = sq_eucl;
     smem_floatIdxs_neighs[k] = (float) j;
+    __syncthreads();
 
     // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
     reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KLD, k);
@@ -201,6 +203,7 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
     // --------  sorting helper with  greedy swaps at non-overlapping indices (really fast) --------
     // ------------------------ 1: between divisible by 2 and not divisible by 2 -------------------
     bool k_divisible_by_2 = (k % 2) == 0;
+    bool k_divisible_by_3 = (k % 3) == 0;
     __syncthreads();
     if(k_divisible_by_2){ // 
         uint32_t left  = k;
@@ -235,6 +238,8 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
         }
     }
     __syncthreads();
+    //reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KLD, k);
+    
     
     // --------  write dists and neigbours to global memory  --------
     sq_eucl = smem_dists[k];
@@ -285,10 +290,11 @@ __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float
     float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
     smem_dists[k]  = sq_eucl;
     smem_floatIdxs_neighs[k] = (float) j;
-    
+    __syncthreads();
+
     // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
     reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KHD, k);
-
+    
     // --------  write dists and neigbours to global memory  --------
     sq_eucl = smem_dists[k];
     j       = (uint32_t) smem_floatIdxs_neighs[k]; // likely different j (during parallel reduction)
@@ -312,7 +318,6 @@ __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* X
 
 __global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed_global){
     extern __shared__ float smem_HD_sqdists_custom[];
-    
     return;
 }
 
