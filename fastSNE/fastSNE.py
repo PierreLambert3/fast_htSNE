@@ -4,6 +4,10 @@ __MAX_INT32_T__ = (2**31) - 1
 import multiprocessing
 from multiprocessing import shared_memory
 
+
+seed = 1422
+np.random.seed(seed)
+
 # import & init pycuda
 import pycuda.driver as cuda
 import pycuda.autoinit
@@ -70,6 +74,10 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
             distances_all_close = np.mean(abs_dist_differences) < 1e-5
             farthest_ok         = (np.abs(farthest_according_to_cpu - farthest_according_to_gpu) < 1e-5)
             if (not distances_all_close)  or (not farthest_ok):
+                # print the index where the distances anr not all close
+                idx_different = np.where(abs_dist_differences > 1e-5)[0]
+                print("idx_different : ", idx_different)
+
                 print("i :", i)
                 print("neigh[:17] ", cpu_neighbours[i][:17])
                 print("diff: ", abs_dist_differences[:17])
@@ -77,9 +85,10 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
                 print("cpu: ", np.round(cpu_neighdists_recomputed[i], 2)[:17])
                 print("----  farthest dists     GPU : ", farthest_according_to_gpu, "CPU : ", farthest_according_to_cpu)
                 print("distances_all_close: ", distances_all_close, "farthest_ok: ", farthest_ok)
+
                 largest_diff = np.max(abs_dist_differences)
                 print("largest disance difference : ", largest_diff)
-                raise Exception("error with neighs and idsts")
+                raise Exception("error with neighs and dists")
             # check that each neighbour is unique
             neighbours = cpu_neighbours[i]
             for k1 in range(K):
@@ -303,6 +312,7 @@ class fastSNE:
         cuda_candidate_idx_LD     = gpuarray.to_gpu(np.zeros((N, __N_CAND_LD__), dtype=np.uint32)) 
         cuda_candidate_dists_LD   = gpuarray.to_gpu(np.zeros((N, __N_CAND_LD__), dtype=np.float32))
         self.testing_neighdists_LD(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, cuda_Xld_true_B, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, stream_neigh_LD)
+        1/0
         self.fill_all_sqdists_LD(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, stream_neigh_LD)
         self.fill_all_sqdists_LD(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, stream_neigh_LD)
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_A, cuda_knn_HD_B, cuda_sqdists_HD_B, cuda_farthest_dist_HD_B, stream_neigh_HD)
@@ -610,7 +620,7 @@ class fastSNE:
         block_shape  = self.Kshapes2d_NxKhd_threads.block_x, self.Kshapes2d_NxKhd_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKhd_threads.grid_x_size, self.Kshapes2d_NxKhd_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKhd_threads.smem_n_bytes_per_block
-        seed = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3
+        seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
         kernel(np.uint32(self.N), np.uint32(self.Mhd), Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         print("verifying for HD dists: ")
         verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream)
@@ -622,7 +632,7 @@ class fastSNE:
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
-        seed = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3
+        seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
         Xld_read = cuda_Xld_true_A
         knn_LD_read = cuda_knn_LD_A
         knn_LD_write = cuda_knn_LD_B
@@ -630,28 +640,34 @@ class fastSNE:
         farthest_dist_LD_write = cuda_farthest_dist_LD_B
         self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, seed, block=block_shape, grid=grid_shape, stream=stream_neigh_LD, shared=smem_n_bytes)
         verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
-            
         import time
         start = time.time()
         for i in range(20):
-            seed = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3
-            Xld_read = cuda_Xld_true_A
-            knn_LD_read = cuda_knn_LD_A
-            knn_LD_write = cuda_knn_LD_B
-            sqdists_LD_write = cuda_sqdists_LD_B
-            farthest_dist_LD_write = cuda_farthest_dist_LD_B
-            self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, seed, block=block_shape, grid=grid_shape, stream=stream_neigh_LD, shared=smem_n_bytes)
-            seed = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3
+            seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
             Xld_read = cuda_Xld_true_B
             knn_LD_read = cuda_knn_LD_B
             knn_LD_write = cuda_knn_LD_A
             sqdists_LD_write = cuda_sqdists_LD_A
             farthest_dist_LD_write = cuda_farthest_dist_LD_A
             self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, seed, block=block_shape, grid=grid_shape, stream=stream_neigh_LD, shared=smem_n_bytes)
+            seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
+            Xld_read = cuda_Xld_true_A
+            knn_LD_read = cuda_knn_LD_A
+            knn_LD_write = cuda_knn_LD_B
+            sqdists_LD_write = cuda_sqdists_LD_B
+            farthest_dist_LD_write = cuda_farthest_dist_LD_B
+            self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, seed, block=block_shape, grid=grid_shape, stream=stream_neigh_LD, shared=smem_n_bytes)
         stream_neigh_LD.synchronize()
         end = time.time()
         print("time taken for all_LD_sqdists_cu: ", np.round((end-start) / 20.0, 4))
-        verify_neighdists(cuda_Xld_true_A, cuda_knn_LD_A, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, self.N, self.Mld, __Kld__, stream_neigh_LD)
+        seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
+        Xld_read = cuda_Xld_true_B
+        knn_LD_read = cuda_knn_LD_B
+        knn_LD_write = cuda_knn_LD_A
+        sqdists_LD_write = cuda_sqdists_LD_A
+        farthest_dist_LD_write = cuda_farthest_dist_LD_A
+        self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, seed, block=block_shape, grid=grid_shape, stream=stream_neigh_LD, shared=smem_n_bytes)
+        verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
 
         1/0
         
@@ -662,7 +678,7 @@ class fastSNE:
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
-        seed = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3
+        seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
         self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream)
         1/0
