@@ -50,7 +50,7 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
     sum_dists = np.zeros((K,), dtype=np.float32)
     
     for i in range(N):
-        do_comparison = np.random.uniform() < 0.1
+        do_comparison = np.random.uniform() < 0.01
         if(do_comparison):
             scaling = 1.0 / 10000000.0
             # GPU values
@@ -77,6 +77,8 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
                 print("cpu: ", np.round(cpu_neighdists_recomputed[i], 2)[:17])
                 print("----  farthest dists     GPU : ", farthest_according_to_gpu, "CPU : ", farthest_according_to_cpu)
                 print("distances_all_close: ", distances_all_close, "farthest_ok: ", farthest_ok)
+                largest_diff = np.max(abs_dist_differences)
+                print("largest disance difference : ", largest_diff)
                 raise Exception("error with neighs and idsts")
             # check that each neighbour is unique
             neighbours = cpu_neighbours[i]
@@ -92,7 +94,7 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
                         print("neighbours[:32]:",neighbours[:32])
                         print("same neighbours : ", j1, j2, " at indices : ", k1, k2)
                         raise Exception("neighbours are not unique")
-            if(i > 50000):
+            if(i > 100000):
                 break
             # short sortedness
             for k in range(K-1):

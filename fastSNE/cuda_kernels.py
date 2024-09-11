@@ -7,7 +7,8 @@ all_the_cuda_code = """
 // --------------------------------------------------------------------------------------------------
 #define MAX_PERPLEXITY (80.0f)
 #define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
-#define KLD       (32u * 1u) 
+//#define KLD       (32u * 1u) 
+#define KLD       (32u * 8u) 
 #define N_CAND_LD (32u)
 #define N_CAND_HD (32u)
 
@@ -153,6 +154,30 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* floa
     __syncthreads();
 }
 
+__device__ __forceinline__ void reduce1d_argmax_uint(float* vector, uint32_t* uint32_perms, uint32_t n, uint32_t i){
+    __syncthreads();
+    uint32_t prev_len = 2u * n;  
+    uint32_t stride   = n;     
+    while(stride > 1u){ // no warpreduce here
+        prev_len = stride; 
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            if(value1 < value2){
+                vector[i]               = value2;
+                vector[i + stride]      = value1;
+                // Swap the permutations
+                uint32_t temp = uint32_perms[i];
+                uint32_perms[i] = uint32_perms[i + stride];
+                uint32_perms[i + stride] = temp;
+            }
+        }
+        __syncthreads();
+    }
+    __syncthreads();
+}
+
 
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  neighbour dists  ------------------------------------------
@@ -199,11 +224,14 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
 
     // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
     reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KLD, k);
+
     
     // --------  sorting helper with  greedy swaps at non-overlapping indices (really fast) --------
     // ------------------------ 1: between divisible by 2 and not divisible by 2 -------------------
     bool k_divisible_by_2 = (k % 2) == 0;
-    bool k_divisible_by_3 = (k % 3) == 0;
+    
+    /* 
+    error sometimes :
     __syncthreads();
     if(k_divisible_by_2){ // 
         uint32_t left  = k;
@@ -222,7 +250,22 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
             smem_floatIdxs_neighs[left]  = smem_floatIdxs_neighs[right];
             smem_floatIdxs_neighs[right] = temp;
         }
+
+        // if left is not divisible by 2, or right is divisible by 2:
+        bool left_not_divisible_by_2  = (left % 2) != 0;
+        bool right_divisible_by_2     = (right % 2) == 0;
+        if(left_not_divisible_by_2 || right_divisible_by_2){
+            printf("NOT GOOD NOT SUPPOSED TO HAPPEN!!\\n");
+        }
+
     }
+    */
+    ok error dans les K ^  cf quand je retirer de commentaires (du coup parfois error ici )
+    ok error dans les K ^  cf quand je retirer de commentaires (du coup parfois error ici )
+    ok error dans les K ^  cf quand je retirer de commentaires (du coup parfois error ici )
+    ok error dans les K ^  cf quand je retirer de commentaires (du coup parfois error ici )
+
+
     __syncthreads();
     if(k_divisible_by_2){
         uint32_t left  = k;
@@ -238,6 +281,25 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
         }
     }
     __syncthreads();
+
+    /*
+    bool k_divisible_by_3 = (k % 3) == 0;
+    if(k_divisible_by_3 && k < KLD - 3){
+        uint32_t left  = k;
+        uint32_t right = k+1;
+        float value1 = smem_dists[left];
+        float value2 = smem_dists[right];
+        if(value1 < value2){
+            smem_dists[left]  = value2;
+            smem_dists[right] = value1;
+            float temp = smem_floatIdxs_neighs[left];
+            smem_floatIdxs_neighs[left]  = smem_floatIdxs_neighs[right];
+            smem_floatIdxs_neighs[right] = temp;
+        }
+    }
+    __syncthreads();
+    */
+
     //reduce1d_argmax_float(smem_dists, smem_floatIdxs_neighs, KLD, k);
     
     
