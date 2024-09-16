@@ -7,6 +7,7 @@ all_the_cuda_code = """
 // --------------------------------------------------------------------------------------------------
 #define MAX_PERPLEXITY (80.0f)
 #define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
+//#define KLD       (32u * 1u) 
 #define KLD       (32u * 1u) 
 #define N_CAND_LD (32u)
 #define N_CAND_HD (32u)
@@ -88,7 +89,10 @@ __device__ __forceinline__ float custom_distance(float* X_i, float* X_j, uint32_
 // --------------------------------------------------------------------------------------------------
 // ------------------------------------  parallel reductions  ---------------------------------------
 // --------------------------------------------------------------------------------------------------
+
+// ------------------------------------  mins and max of vector ------------------------------------
 __device__ __forceinline__ void warpReduce1d_minMax_float(volatile float* vector_mins, volatile float* vector_maxs, uint32_t i, uint32_t prev_len, uint32_t stride){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
     while(stride > 1u){
         prev_len = stride;
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
@@ -104,6 +108,8 @@ __device__ __forceinline__ void warpReduce1d_minMax_float(volatile float* vector
 }
 
 __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float* vector_maxs, uint32_t n, uint32_t i){
+    printf("wtf here 1  (doesnt call warpreduce). Carefull if 2d blocks, cf neighbour dists: only reduce on the x dimension of the block (else not same warps)\\n");
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
     __syncthreads();
     uint32_t prev_len = 2u * n;
     uint32_t stride   = n;
@@ -127,11 +133,31 @@ __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float*
     __syncthreads();
 }
 
+// ------------------------------------  sum of vector elements ------------------------------------
+__device__ __forceinline__ void warpReduce1d_argmax_float(volatile float* vector, volatile float* float_perms, uint32_t i, uint32_t prev_len, uint32_t stride){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            if(value1 < value2){
+                vector[i]               = value2;
+                vector[i + stride]      = value1;
+                float temp = float_perms[i];
+                float_perms[i] = float_perms[i + stride];
+                float_perms[i + stride] = temp;
+            }
+        }
+    }
+}
+
 __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* float_perms, uint32_t n, uint32_t i){
     __syncthreads();
     uint32_t prev_len = 2u * n;  
     uint32_t stride   = n;     
-    while(stride > 1u){ 
+    while(stride > 32u){ 
         prev_len = stride; 
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
@@ -148,8 +174,87 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, float* floa
         }
         __syncthreads();
     }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_argmax_float(vector, float_perms, i, prev_len, stride);
+    }
     __syncthreads();
 }
+
+__device__ __forceinline__ void warpReduce1d_sum_float(volatile float* vector, uint32_t i, uint32_t prev_len, uint32_t stride){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            vector[i]    = value1 + value2;
+        }
+    }
+}
+
+__device__ __forceinline__ void reduce1d_sum_float(float* vector, uint32_t n, uint32_t i){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    __syncthreads();
+    uint32_t prev_len = 2u * n;
+    uint32_t stride   = n;
+    while(stride > 32u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            vector[i]    = value1 + value2;
+        }
+        __syncthreads();
+    }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_sum_float(vector, i, prev_len, stride);
+    }
+    __syncthreads();
+}
+
+__device__ __forceinline__ void warpReduce1d_sum_double(volatile double* vector, uint32_t i, uint32_t prev_len, uint32_t stride){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            double value1 = vector[i];
+            double value2 = vector[i + stride];
+            vector[i]    = value1 + value2;
+        }
+    }
+}
+
+__device__ __forceinline__ void reduce1d_sum_double(double* vector, uint32_t n, uint32_t i){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    __syncthreads();
+    uint32_t prev_len = 2u * n;
+    uint32_t stride   = n;
+    while(stride > 32u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            double value1 = vector[i];
+            double value2 = vector[i + stride];
+            vector[i]    = value1 + value2;
+        }
+        __syncthreads();
+    }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_sum_double(vector, i, prev_len, stride);}
+    __syncthreads();
+}
+
+
+
+// ------------------------------------  max and permutations ------------------------------------
+
+
 
 // --------------------------------------------------------------------------------------------------
 // -------   non-overlapping random swaps: fast & helps the incremental sorting of the array   ------
@@ -250,11 +355,13 @@ __device__ __forceinline__ void magicSwaps_global(float* vector, float* float_pe
 // -------------------------------------  neighbour dists  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
 __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write,\
-     float* simiNominators_LD_write, float* lvl1Sums_simiNominators_LD_write, float cauchy_alpha, uint32_t seed){
+     float* simiNominators_LD_write, double* lvl1_sumsSimiNominators_LD_write, float cauchy_alpha, uint32_t seed){
     extern __shared__ float smem_LD_sqdists[];
-    uint32_t obs_i_in_block = threadIdx.x;
-    uint32_t k              = threadIdx.y;
-    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+
     if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
         return;}
     bool is_0_thread = (k == 0u);
@@ -262,8 +369,8 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
 
     // --------  shared memory partition  --------
     float* X_i                   = &smem_LD_sqdists[obs_i_in_block * Mld];
-    float* smem_dists            = &smem_LD_sqdists[blockDim.x * Mld + obs_i_in_block*KLD];
-    float* smem_floatIdxs_neighs = &smem_LD_sqdists[blockDim.x * Mld + blockDim.x*KLD + obs_i_in_block*KLD]; // it's okay
+    float* smem_dists            = &smem_LD_sqdists[n_obs_in_block * Mld + obs_i_in_block*KLD];
+    float* smem_floatIdxs_neighs = &smem_LD_sqdists[n_obs_in_block * Mld + n_obs_in_block*KLD + obs_i_in_block*KLD]; // it's okay
 
     // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
     if(KLD >= Mld){ //  coalesced access to global memory: nice
@@ -310,18 +417,33 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
     }
 
     // --------  compute the similarity in LD and save it --------
-    // TODO further optimisation: since we divide by bigDenom, remove the 1/... from the nominator and modify bigDenom accordingly
-    float simi_nominator      = 1.0f / powf(1.0f + sq_eucl/alpha, alpha);
-    float simi_nominator_FAST = 1.0f / __powf(1.0f + sq_eucl/alpha, alpha); 
+    float* smems_snoms       = &smem_LD_sqdists[obs_i_in_block * KLD];
+    // TODO  : further optimisation: since we divide by bigDenom, remove the 1/... from the nominator and modify bigDenom accordingly
+    // TODO2 : use double precision for bigDenom
+    // float simi_nominator  = 1.0f / powf(1.0f + sq_eucl/cauchy_alpha, cauchy_alpha);
+    float  simi_nominator    = 1.0f / __powf(1.0f + sq_eucl/cauchy_alpha, cauchy_alpha); 
+    __syncthreads();  // necessary because same location as smem_dists which is used just before
+    smems_snoms[k] = simi_nominator;
+    __syncthreads();
 
+    // --------  compute the sum on all neighbours for each point --------
+    reduce1d_sum_float(smems_snoms, KLD, k);
+    
+    // --------  write the partial sum of nominators to global memory  --------
+    __syncthreads();
+    if(is_0_thread){
+        lvl1_sumsSimiNominators_LD_write[obs_i_global] = (double) smems_snoms[0];
+    }
     return;
 }
 
 __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
     extern __shared__ float smem_HD_sqdists_euclidean[];
-    uint32_t obs_i_in_block = threadIdx.x;
-    uint32_t k              = threadIdx.y;
-    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+
     if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
         return;}
     bool is_0_thread = (k == 0u);
@@ -329,8 +451,8 @@ __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float
 
     // --------  shared memory partition  --------
     float* X_i                   = &smem_HD_sqdists_euclidean[obs_i_in_block * Mhd];
-    float* smem_dists            = &smem_HD_sqdists_euclidean[blockDim.x * Mhd + obs_i_in_block*KHD];
-    float* smem_floatIdxs_neighs = &smem_HD_sqdists_euclidean[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+    float* smem_dists            = &smem_HD_sqdists_euclidean[n_obs_in_block * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_euclidean[n_obs_in_block * Mhd + n_obs_in_block*KHD + obs_i_in_block*KHD]; // it's okay
 
     // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
     if(KHD >= Mhd){ //  coalesced access to global memory: nice
@@ -379,9 +501,11 @@ __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float
 }
 __global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
     extern __shared__ float smem_HD_sqdists_manhattan[];
-    uint32_t obs_i_in_block = threadIdx.x;
-    uint32_t k              = threadIdx.y;
-    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+
     if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
         return;}
     bool is_0_thread = (k == 0u);
@@ -389,8 +513,8 @@ __global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float
 
     // --------  shared memory partition  --------
     float* X_i                   = &smem_HD_sqdists_manhattan[obs_i_in_block * Mhd];
-    float* smem_dists            = &smem_HD_sqdists_manhattan[blockDim.x * Mhd + obs_i_in_block*KHD];
-    float* smem_floatIdxs_neighs = &smem_HD_sqdists_manhattan[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+    float* smem_dists            = &smem_HD_sqdists_manhattan[n_obs_in_block * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_manhattan[n_obs_in_block * Mhd + n_obs_in_block*KHD + obs_i_in_block*KHD]; // it's okay
 
     // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
     if(KHD >= Mhd){ //  coalesced access to global memory: nice
@@ -439,9 +563,11 @@ __global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float
 }
 __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
     extern __shared__ float smem_HD_sqdists_cosine[];
-    uint32_t obs_i_in_block = threadIdx.x;
-    uint32_t k              = threadIdx.y;
-    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+
     if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
         return;}
     bool is_0_thread = (k == 0u);
@@ -449,8 +575,8 @@ __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* X
 
     // --------  shared memory partition  --------
     float* X_i                   = &smem_HD_sqdists_cosine[obs_i_in_block * Mhd];
-    float* smem_dists            = &smem_HD_sqdists_cosine[blockDim.x * Mhd + obs_i_in_block*KHD];
-    float* smem_floatIdxs_neighs = &smem_HD_sqdists_cosine[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+    float* smem_dists            = &smem_HD_sqdists_cosine[n_obs_in_block * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_cosine[n_obs_in_block * Mhd + n_obs_in_block*KHD + obs_i_in_block*KHD]; // it's okay
 
     // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
     if(KHD >= Mhd){ //  coalesced access to global memory: nice
@@ -495,14 +621,17 @@ __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* X
     if(is_0_thread){ // k=0 contains the furthest dist after  reduction
         farthest_dist_HD_write[obs_i_global] = sq_eucl;
     }
+    
     return;
 }
 
 __global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
     extern __shared__ float smem_HD_sqdists_custom[];
-    uint32_t obs_i_in_block = threadIdx.x;
-    uint32_t k              = threadIdx.y;
-    uint32_t obs_i_global   = threadIdx.x + blockIdx.x * blockDim.x;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+
     if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
         return;}
     bool is_0_thread = (k == 0u);
@@ -510,8 +639,8 @@ __global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* X
 
     // --------  shared memory partition  --------
     float* X_i                   = &smem_HD_sqdists_custom[obs_i_in_block * Mhd];
-    float* smem_dists            = &smem_HD_sqdists_custom[blockDim.x * Mhd + obs_i_in_block*KHD];
-    float* smem_floatIdxs_neighs = &smem_HD_sqdists_custom[blockDim.x * Mhd + blockDim.x*KHD + obs_i_in_block*KHD]; // it's okay
+    float* smem_dists            = &smem_HD_sqdists_custom[n_obs_in_block * Mhd + obs_i_in_block*KHD];
+    float* smem_floatIdxs_neighs = &smem_HD_sqdists_custom[n_obs_in_block * Mhd + n_obs_in_block*KHD + obs_i_in_block*KHD]; // it's okay
 
     // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
     if(KHD >= Mhd){ //  coalesced access to global memory: nice
@@ -556,6 +685,7 @@ __global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* X
     if(is_0_thread){ // k=0 contains the furthest dist after  reduction
         farthest_dist_HD_write[obs_i_global] = sq_eucl;
     }
+    
     return;
 }
 
