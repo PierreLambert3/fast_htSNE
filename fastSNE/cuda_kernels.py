@@ -7,7 +7,6 @@ all_the_cuda_code = """
 // --------------------------------------------------------------------------------------------------
 #define MAX_PERPLEXITY (80.0f)
 #define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
-//#define KLD       (32u * 1u) 
 #define KLD       (32u * 1u) 
 #define N_CAND_LD (32u)
 #define N_CAND_HD (32u)
@@ -108,13 +107,12 @@ __device__ __forceinline__ void warpReduce1d_minMax_float(volatile float* vector
 }
 
 __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float* vector_maxs, uint32_t n, uint32_t i){
-    printf("wtf here 1  (doesnt call warpreduce). Carefull if 2d blocks, cf neighbour dists: only reduce on the x dimension of the block (else not same warps)\\n");
     // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
     __syncthreads();
     uint32_t prev_len = 2u * n;
     uint32_t stride   = n;
-    while(stride > 32u){
-    //while(stride > 1u){
+    while(stride > 1u){
+    //while(stride > 32u){
         prev_len = stride;
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
@@ -128,8 +126,9 @@ __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float*
         __syncthreads();
     }
     // one warp remaining: no need to sync anymore
-    //if(i + stride < prev_len){
-    //    warpReduce1d_minMax_float(vector_mins, vector_maxs, i, prev_len, stride);}
+    if(i + stride < prev_len){
+        warpReduce1d_minMax_float(vector_mins, vector_maxs, i, prev_len, stride);
+    }
     __syncthreads();
 }
 
@@ -349,7 +348,17 @@ __device__ __forceinline__ void magicSwaps_global(float* vector, float* float_pe
 
 
 
-
+__global__ void kernel_doubleSumReduction_one_step(double* input_vector, double* output_vector, uint32_t input_size){
+    extern __shared__ double smem_doubleSumReduction_one_step[];
+    uint32_t i_global = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t i_local = threadIdx.x;
+    smem_doubleSumReduction_one_step[i_local] = (i_global < input_size) ? input_vector[i_global] : 0.0;
+    __syncthreads();
+    reduce1d_sum_double(smem_doubleSumReduction_one_step, blockDim.x, i_local);
+    if(i_local == 0){
+        output_vector[blockIdx.x] = smem_doubleSumReduction_one_step[0];
+    }
+}
 
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  neighbour dists  ------------------------------------------

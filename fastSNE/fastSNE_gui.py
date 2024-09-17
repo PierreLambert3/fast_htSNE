@@ -128,9 +128,10 @@ class Button:
 class ModernGLWindow(pyglet.window.Window):
     def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please,\
                  min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul, **kwargs):
-        # config = pyglet.gl.Config(double_buffer=True, depth_size=24, sample_buffers=1, samples=4)
-        config = pyglet.gl.Config(double_buffer=True)
-        super().__init__(config=config,vsync=True, **kwargs)
+        config = pyglet.gl.Config(double_buffer=True, depth_size=24, sample_buffers=1, samples=4)
+        # config = pyglet.gl.Config(double_buffer=True)
+        # super().__init__(config=config,vsync=True, **kwargs)
+        super().__init__(config=config, vsync=True, **kwargs)
 
         if(Mld != 2):
             raise ValueError("Gui not implemented for Mld != 2")
