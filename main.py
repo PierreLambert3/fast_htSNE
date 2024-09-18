@@ -5,6 +5,10 @@ import matplotlib.pyplot as plt
 #include both modules
 import fastSNE.fastSNE as fastSNE
 
+
+
+
+
 def fetch_dataset():
     # binary dump from a C flattened array of floats (32bits)
     mnist_binaries_path = r"C:\Users\pierr\dev\datasets\bin\mnist"

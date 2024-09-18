@@ -18,12 +18,25 @@ __MIN_KERNEL_ALPHA__ = 0.05
 __MAX_ATTRACTION_MULTIPLIER__ = 10.0
 __MIN_ATTRACTION_MULTIPLIER__ = 0.1
 
+
+
+# rien ne garantie que le voisin du voisin de soit pas deja dans ses propres voisins (voisinn mutuel)
+# -->  il faut pour chaque candidate faire le full check des voisins
+
+
 # these are defined in the compiled side of the project (in cuda_kernels.py)
 __MAX_PERPLEXITY__ = None
 __Khd__       = None
 __Kld__       = None
 __N_CAND_LD__ = None
 __N_CAND_HD__ = None
+
+def generate_orthogonal_matrix(Mhd, Mld):
+    random_matrix = np.random.randn(Mhd, Mld).astype(np.float32)
+    Q, R = np.linalg.qr(random_matrix)
+    std = np.std(Q, axis=0)
+    target_std = 1.0
+    return Q * (target_std / std)
 
 class Kernel_shapes:
     def __init__(self, N_threads_total, threads_per_block_multiple_of, smem_n_float32_per_thread, cuda_device_attributes, constant_additional_smem_n_float32):
@@ -151,9 +164,9 @@ class fastSNE:
         self.Mhd      = M
         self.Xhd      = Xhd
         # project Xhd linearly to init Xld
-        self.cpu_Xld = np.dot(Xhd, np.random.normal(size=(self.Mhd, self.Mld))).astype(np.float32)
-        self.linear_projection = np.random.normal(size=(self.Mhd, self.Mld)).astype(np.float32)
-        self.linear_projection_momentum = 0.05 * np.random.normal(size=(self.Mhd, self.Mld)).astype(np.float32)
+        self.linear_projection_now    = generate_orthogonal_matrix(self.Mhd, self.Mld)
+        self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
+        self.cpu_Xld = np.dot(Xhd, self.linear_projection_now).astype(np.float32)
         # determine grid shapes, block shapes, smem size for each CUDA kernels & compile kernels
         self.configue_and_initialise_CUDA_kernels_please(__Khd__, __Kld__, self.Mhd, self.Mld)
         # cuda streams
@@ -301,8 +314,8 @@ class fastSNE:
 
         # init neighbours dists , fartherst dists, and simiNominators
         n_levels = len(self.L_Kshapes_bigDenomReductions)
-        self.fill_all_sqdists_LD(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, simiNominators_LD_B, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_B, self.kern_alpha, stream_neigh_LD)
-        self.fill_all_sqdists_LD(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, simiNominators_LD_A, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_A, self.kern_alpha, stream_neigh_LD)
+        self.fill_all_sqdists_LD(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, simiNominators_LD_B, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_B, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
+        self.fill_all_sqdists_LD(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, simiNominators_LD_A, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_A, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_A, cuda_knn_HD_B, cuda_sqdists_HD_B, cuda_farthest_dist_HD_B, stream_neigh_HD)
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_B, cuda_knn_HD_A, cuda_sqdists_HD_A, cuda_farthest_dist_HD_A, stream_neigh_HD)
         stream_neigh_HD.synchronize()
@@ -465,8 +478,12 @@ class fastSNE:
 
             isPhaseA = not isPhaseA  # ONLY CHANGE EVERY 4 ITERATION (because 4 grads per neigh update)
             iteration_int += 1
-            if warmup and iteration_int >= 200:
-                warmup = False
+
+            if warmup:
+                if iteration_int >= 20000:
+                    warmup = False
+                if iteration_int % 20 == 0:
+                    self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
         process_gui.join()
@@ -481,10 +498,8 @@ class fastSNE:
     def one_iteration(self, warmup, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write, farthest_dist_HD_read, farthest_dist_HD_write, candidate_dists_HD, knn_LD_read, knn_LD_write, sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, candidate_dists_LD, cuda_candidate_idx_LD, cuda_candidate_idx_HD, stream_neigh_HD, stream_neigh_LD, stream_grads):
         # 0/ - gradient computations & update positions
         if warmup:
-            self.linear_projection_momentum +=  0.1 * np.random.normal(size=(self.Mhd, self.Mld)).astype(np.float32)* np.random.normal(size=(self.Mhd, self.Mld)).astype(np.float32)
-            self.linear_projection_momentum *= 0.99
-            self.linear_projection += self.linear_projection_momentum
-            self.cpu_Xld = np.dot(self.Xhd, self.linear_projection).astype(np.float32)
+            self.linear_projection_now = 0.93 * self.linear_projection_now + 0.07 * self.linear_projection_target
+            self.cpu_Xld = np.dot(self.Xhd, self.linear_projection_now).astype(np.float32)
             write_Xld.set_async(self.cpu_Xld, stream=stream_grads)
         else:
             pass
@@ -611,7 +626,7 @@ class fastSNE:
         print("this should only be called once at init")
         # verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream)
 
-    def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cuda_lvl2_sumSimiNominators_LD, cuda_lvl3_sumSimiNominators_LD, cuda_lvl4_sumSimiNominators_LD, denom_LD_neighboursPart_write, cauchy_alpha, stream):
+    def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cuda_lvl2_sumSimiNominators_LD, cuda_lvl3_sumSimiNominators_LD, cuda_lvl4_sumSimiNominators_LD, denom_LD_neighboursPart_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, cauchy_alpha, stream):
         # 1.  squared dists to LD neighbours, sort neighbours, find farthest dists
         #     compute similarity nominators and first reduction on them for each i
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
@@ -619,7 +634,22 @@ class fastSNE:
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
         seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
         self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cauchy_alpha, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-        # finishing the similarity nominators reduction, with multi-level reductions
+        
+        """
+        # 2. candidate neighbours: generate, compute dists, and partial sort
+        seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 79823
+        block_shape = self.Kshapes2d_NxNcandLD_threads.block_x, self.Kshapes2d_NxNcandLD_threads.block_y, 1
+        grid_shape  = self.Kshapes2d_NxNcandLD_threads.grid_x_size, self.Kshapes2d_NxNcandLD_threads.grid_y_size, 1
+        smem_n_bytes = self.Kshapes2d_NxNcandLD_threads.smem_n_bytes_per_block
+        self.candidates_LD_generate_and_sort_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, cuda_candidate_dists_LD, cuda_candidate_idx_LD, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        # 3. candidate neighbours: insert using a loop (N threads = N)
+        block_shape = self.Kshapes_N_threads.threads_per_block, 1, 1
+        grid_shape  = self.Kshapes_N_threads.grid_x_size, self.Kshapes_N_threads.grid_y_size, 1
+        smem_n_bytes = self.Kshapes_N_threads.smem_n_bytes_per_block
+        self.candidates_LD_insert_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        """
+
+        # 4. finishing the similarity nominators reduction, with multi-level reductions
         n_levels = len(self.L_Kshapes_bigDenomReductions)
         for level in range(n_levels):
             Kshape       = self.L_Kshapes_bigDenomReductions[level]
@@ -775,8 +805,9 @@ class fastSNE:
         self.all_HD_sqdists_cosine_cu    = self.compiled_cuda_code.get_function("compute_all_HD_sqdists_cosine")
         self.all_HD_sqdists_custom_cu    = self.compiled_cuda_code.get_function("compute_all_HD_sqdists_custom")
         self.all_LD_sqdists_cu           = self.compiled_cuda_code.get_function("compute_all_LD_sqdists")
+        self.candidates_LD_generate_and_sort_cu = self.compiled_cuda_code.get_function("candidates_LD_generate_and_sort")
+        self.candidates_LD_insert_cu          = self.compiled_cuda_code.get_function("candidates_LD_insert")
         self.kernel_doubleSumReduction_one_step = self.compiled_cuda_code.get_function("kernel_doubleSumReduction_one_step")
-        
 
     def free_all_GPU_memory(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
         # cuda_context.pop() # not needed if pycuda.autoinit is used
@@ -921,7 +952,6 @@ class fastSNE:
         farthest_dist_HD_write = cuda_farthest_dist_HD_A
         self.all_HD_sqdists_euclidean_cu(np.uint32(self.N), np.uint32(self.Mhd), Xhd_read, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, seed, block=block_shape, grid=grid_shape, stream=stream_neigh_HD, shared=smem_n_bytes)
         verify_neighdists(Xhd_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream_neigh_HD)
-
 
 def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K, stream):
     # sync stream

@@ -227,6 +227,8 @@ class ModernGLWindow(pyglet.window.Window):
         return vertex_shader, fragment_shader
 
     def on_draw(self):
+        print("only draw if finished rendering")
+
         # only draw when I want to
         if not self.redraw_now:
             return

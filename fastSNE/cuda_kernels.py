@@ -361,6 +361,21 @@ __global__ void kernel_doubleSumReduction_one_step(double* input_vector, double*
 }
 
 // --------------------------------------------------------------------------------------------------
+// -------------------------------------  candidate neighbours  ------------------------------------------
+// --------------------------------------------------------------------------------------------------
+
+__global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, float* candidate_dists_LD, uint32_t* candidate_idx_LD, uint32_t seed){
+    return;
+}
+
+__global__ void candidates_LD_insert(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_write, float* candidate_dists_LD, uint32_t* candidate_idx_LD, uint32_t seed){
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N){
+        return;}
+    return;
+}
+
+// --------------------------------------------------------------------------------------------------
 // -------------------------------------  neighbour dists  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
 __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write,\
