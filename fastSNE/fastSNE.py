@@ -159,6 +159,9 @@ class fastSNE:
             raise Exception("fastSNE: the high-dimensional data contains NaNs")
         if __Khd__ >= (N/2-1):
             raise Exception("fastSNE: the number of neighbours K is too large for the number of samples N (reducting __MAX_PERPLEXITY__ should do the trick)")
+        if __N_CAND_LD__ < 32 or __N_CAND_HD__ < 32:
+            raise Exception("fastSNE: __N_CAND_LD__ and __N_CAND_HD__ must be at least 32 (and preferably a multiple of 32). Change the values of __N_CAND_LD__ and __N_CAND_HD__ in cuda_kernels.py")
+        
         # on CPU
         self.N        = N
         self.Mhd      = M
@@ -314,8 +317,8 @@ class fastSNE:
 
         # init neighbours dists , fartherst dists, and simiNominators
         n_levels = len(self.L_Kshapes_bigDenomReductions)
-        self.fill_all_sqdists_LD(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, simiNominators_LD_B, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_B, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
-        self.fill_all_sqdists_LD(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, simiNominators_LD_A, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_A, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
+        self.fill_all_sqdists_LD(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_HD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, simiNominators_LD_B, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_B, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
+        self.fill_all_sqdists_LD(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_HD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, simiNominators_LD_A, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_A, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_A, cuda_knn_HD_B, cuda_sqdists_HD_B, cuda_farthest_dist_HD_B, stream_neigh_HD)
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_B, cuda_knn_HD_A, cuda_sqdists_HD_A, cuda_farthest_dist_HD_A, stream_neigh_HD)
         stream_neigh_HD.synchronize()
@@ -626,7 +629,7 @@ class fastSNE:
         print("this should only be called once at init")
         # verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream)
 
-    def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cuda_lvl2_sumSimiNominators_LD, cuda_lvl3_sumSimiNominators_LD, cuda_lvl4_sumSimiNominators_LD, denom_LD_neighboursPart_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, cauchy_alpha, stream):
+    def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_HD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cuda_lvl2_sumSimiNominators_LD, cuda_lvl3_sumSimiNominators_LD, cuda_lvl4_sumSimiNominators_LD, denom_LD_neighboursPart_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, cauchy_alpha, stream):
         # 1.  squared dists to LD neighbours, sort neighbours, find farthest dists
         #     compute similarity nominators and first reduction on them for each i
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
@@ -635,19 +638,17 @@ class fastSNE:
         seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
         self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cauchy_alpha, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         
-        """
         # 2. candidate neighbours: generate, compute dists, and partial sort
         seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 79823
         block_shape = self.Kshapes2d_NxNcandLD_threads.block_x, self.Kshapes2d_NxNcandLD_threads.block_y, 1
         grid_shape  = self.Kshapes2d_NxNcandLD_threads.grid_x_size, self.Kshapes2d_NxNcandLD_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxNcandLD_threads.smem_n_bytes_per_block
-        self.candidates_LD_generate_and_sort_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, cuda_candidate_dists_LD, cuda_candidate_idx_LD, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        self.candidates_LD_generate_and_sort_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_HD_read, cuda_candidate_dists_LD, cuda_candidate_idx_LD, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         # 3. candidate neighbours: insert using a loop (N threads = N)
-        block_shape = self.Kshapes_N_threads.threads_per_block, 1, 1
-        grid_shape  = self.Kshapes_N_threads.grid_x_size, self.Kshapes_N_threads.grid_y_size, 1
+        block_shape  = self.Kshapes_N_threads.threads_per_block, 1, 1
+        grid_shape   = self.Kshapes_N_threads.grid_x_size, self.Kshapes_N_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes_N_threads.smem_n_bytes_per_block
         self.candidates_LD_insert_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-        """
 
         # 4. finishing the similarity nominators reduction, with multi-level reductions
         n_levels = len(self.L_Kshapes_bigDenomReductions)
@@ -655,6 +656,7 @@ class fastSNE:
             Kshape       = self.L_Kshapes_bigDenomReductions[level]
             block_shape  = Kshape.threads_per_block, 1, 1
             grid_shape   = Kshape.grid_x_size, Kshape.grid_y_size, 1
+            smem_n_bytes = Kshape.smem_n_bytes_per_block
             array_to_reduce = None
             array_result    = None
             if level == 0:
@@ -668,6 +670,7 @@ class fastSNE:
                 array_result    = cuda_lvl4_sumSimiNominators_LD
             input_size = self.L_lvl_sizes[level]
             self.kernel_doubleSumReduction_one_step(array_to_reduce, array_result, input_size, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+
 
     def configue_and_initialise_CUDA_kernels_please(self, Khd, Kld, Mhd, Mld):
         N = self.N
@@ -872,7 +875,7 @@ class fastSNE:
         verify_neighdists(Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
         
         import time
-        niter = 5
+        niter = 2
         start = time.time()
         for i in range(niter):
             seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378

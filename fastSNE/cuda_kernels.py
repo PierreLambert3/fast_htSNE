@@ -133,6 +133,54 @@ __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float*
 }
 
 // ------------------------------------  sum of vector elements ------------------------------------
+__device__ __forceinline__ void warpReduce1d_argmin_float(volatile float* vector, volatile float* float_perms, uint32_t i, uint32_t prev_len, uint32_t stride){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            if(value1 > value2){
+                vector[i]               = value2;
+                vector[i + stride]      = value1;
+                float temp = float_perms[i];
+                float_perms[i] = float_perms[i + stride];
+                float_perms[i + stride] = temp;
+            }
+        }
+    }
+}
+__device__ __forceinline__ void reduce1d_argmin_float(float* vector, float* float_perms, uint32_t n, uint32_t i){
+    __syncthreads();
+    uint32_t prev_len = 2u * n;  
+    uint32_t stride   = n;     
+    while(stride > 32u){ 
+        prev_len = stride; 
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            if(value1 > value2){
+                vector[i]               = value2;
+                vector[i + stride]      = value1;
+                // Swap the permutations
+                float temp = float_perms[i];
+                float_perms[i] = float_perms[i + stride];
+                float_perms[i + stride] = temp;
+            }
+        }
+        __syncthreads();
+    }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_argmin_float(vector, float_perms, i, prev_len, stride);
+    }
+    __syncthreads();
+}
+
+
+
 __device__ __forceinline__ void warpReduce1d_argmax_float(volatile float* vector, volatile float* float_perms, uint32_t i, uint32_t prev_len, uint32_t stride){
     // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
     while(stride > 1u){
@@ -347,6 +395,92 @@ __device__ __forceinline__ void magicSwaps_global(float* vector, float* float_pe
 }
 
 
+__device__ __forceinline__ void magicSwaps_local_ascending(float* vector, float* float_perms, uint32_t k, uint32_t _K_, bool k_divisible_by_2, bool k_divisible_by_3){
+    __syncthreads();
+    if(k_divisible_by_2){ 
+        uint32_t left  = k;
+        uint32_t right = k+1;
+        float value1 = vector[left];
+        float value2 = vector[right];
+        if(value1 > value2){
+            vector[left]  = value2;
+            vector[right] = value1;
+            float temp = float_perms[left];
+            float_perms[left]  = float_perms[right];
+            float_perms[right] = temp;
+        }
+    }
+    __syncthreads();
+    if(k_divisible_by_3 && k < _K_-3){
+        uint32_t left  = k;
+        uint32_t right = k+2;
+        float value1 = vector[left];
+        float value2 = vector[right];
+        if(value1 > value2){
+            vector[left]  = value2;
+            vector[right] = value1;
+            float temp = float_perms[left];
+            float_perms[left]  = float_perms[right];
+            float_perms[right] = temp;
+        }
+    }
+    __syncthreads();
+    if(k_divisible_by_2 && k > 0){ 
+        uint32_t left  = k-1;
+        uint32_t right = k;
+        float value1 = vector[left];
+        float value2 = vector[right];
+        if(value1 > value2){
+            vector[left]  = value2;
+            vector[right] = value1;
+            float temp = float_perms[left];
+            float_perms[left]  = float_perms[right];
+            float_perms[right] = temp;
+        }
+    }
+}
+
+// the seed MUST be assured to be significantly smaller than max_uint32_t else overflow is possible
+__device__ __forceinline__ void magicSwaps_global_ascending(float* vector, float* float_perms, uint32_t k, uint32_t _K_, bool k_divisible_by_2, uint32_t seed){
+    __syncthreads();
+    if(k_divisible_by_2){ 
+        uint32_t left  = k;
+        uint32_t right = ((seed + k/2) * 2u + 1u) % _K_; 
+        if(left > right){
+            uint32_t tmpidx = right;
+            right = left;
+            left  = tmpidx;
+        }
+        float value1 = vector[left];
+        float value2 = vector[right];
+        if(value1 > value2){
+            vector[left]  = value2;
+            vector[right] = value1;
+            float temp = float_perms[left];
+            float_perms[left]  = float_perms[right];
+            float_perms[right] = temp;
+        }
+    }
+    __syncthreads();
+    if(k_divisible_by_2){ 
+        uint32_t left  = k;
+        uint32_t right = (((67239+seed/2) + k/2) * 2u + 1u) % _K_;
+        if(left > right){
+            uint32_t tmpidx = right;
+            right = left;
+            left  = tmpidx;
+        }
+        float value1 = vector[left];
+        float value2 = vector[right];
+        if(value1 > value2){
+            vector[left]  = value2;
+            vector[right] = value1;
+            float temp = float_perms[left];
+            float_perms[left]  = float_perms[right];
+            float_perms[right] = temp;
+        }
+    }
+}
 
 __global__ void kernel_doubleSumReduction_one_step(double* input_vector, double* output_vector, uint32_t input_size){
     extern __shared__ double smem_doubleSumReduction_one_step[];
@@ -363,8 +497,76 @@ __global__ void kernel_doubleSumReduction_one_step(double* input_vector, double*
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  candidate neighbours  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
-
-__global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, float* candidate_dists_LD, uint32_t* candidate_idx_LD, uint32_t seed){
+// block x : candidate number   block y : observation number
+__global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read, uint32_t* knn_HD_read, float* candidate_dists_LD, uint32_t* candidate_idx_LD, uint32_t seed_shared){
+    extern __shared__ float smem_LD_candidates[];
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t cand_number    = threadIdx.x; 
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * blockDim.x;
+    if(obs_i_global >= N){
+        return;}
+    const uint32_t lookat_rand_until     = 6u;
+    const uint32_t lookat_LDneighs_until = lookat_rand_until + ((N_CAND_LD - lookat_rand_until) / 2u);
+    const uint32_t lookat_HDneighs_until = N_CAND_LD;
+    // ------- init  shared memory -------
+    float*    X_i             = &smem_LD_candidates[obs_i_in_block * Mld];
+    float*    cand_dists      = &smem_LD_candidates[n_obs_in_block * Mld + obs_i_in_block*N_CAND_LD];
+    float*    float_cand_idxs = &smem_LD_candidates[n_obs_in_block * Mld + n_obs_in_block*N_CAND_LD + obs_i_in_block*N_CAND_LD];
+    if(N_CAND_LD >= Mld){
+        if(cand_number < Mld){
+            float Xi_m = Xld_read[obs_i_global * Mld + cand_number];
+            X_i[cand_number] = Xi_m;
+        }
+    }
+    else{  
+        if(cand_number == 0u){
+            float* Xi_globalmem = &Xld_read[obs_i_global * Mld];
+            for(uint32_t m = 0; m < Mld; m++){
+                float Xi_m = Xi_globalmem[m];
+                X_i[m]     = Xi_m;
+            }
+        }
+    }
+    __syncthreads();  // sync for smem
+    // ------- init  a local seed -------
+    uint32_t seed_local = seed_shared + (obs_i_global*N_CAND_LD)*2387u + cand_number*2u;
+    random_uint32_t_xorshift32(&seed_local);
+    // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in LD or HD -------
+    uint32_t cand_i = 0u;
+    if(cand_number < 6u){ // random index
+        cand_i = random_uint32_t_xorshift32(&seed_local) % N;
+    }
+    else if (cand_number < lookat_LDneighs_until){
+        uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KLD;
+        uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KLD;
+        uint32_t neighbour = knn_LD_read[obs_i_global*KLD + r1];
+        cand_i = knn_LD_read[neighbour*KLD + r2];
+    } 
+    else{
+        uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KHD;
+        uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KHD;
+        uint32_t neighbour = knn_HD_read[obs_i_global*KHD + r1];
+        cand_i = knn_HD_read[neighbour*KHD + r2];
+    }
+    float_cand_idxs[cand_number] = (float) cand_i;
+    // ------- compute the distance to the candidate -------
+    float* X_cand = &Xld_read[cand_i * Mld];
+    float dist = squared_euclidean_distance(X_i, X_cand, Mld);
+    cand_dists[cand_number] = dist;
+    // -------  approximate sorting, ascending this time (opposite to neighbour sort)  --------
+    reduce1d_argmin_float(cand_dists, float_cand_idxs, N_CAND_LD, cand_number);
+    bool cand_divisible_by_2 = (cand_number % 2) == 0;
+    bool cand_divisible_by_3 = (cand_number % 3) == 0;
+    magicSwaps_global_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, cand_divisible_by_3);
+    seed_shared = (seed_shared / 2u) + 209383u;
+    magicSwaps_global_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, cand_divisible_by_3);
+    // -------  write the results to global memory  --------
+    __syncthreads();
+    candidate_dists_LD[obs_i_global*N_CAND_LD + cand_number] = cand_dists[cand_number];
+    candidate_idx_LD[obs_i_global*N_CAND_LD + cand_number]   = (uint32_t) float_cand_idxs[cand_number];
     return;
 }
 
