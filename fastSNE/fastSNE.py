@@ -233,6 +233,11 @@ class fastSNE:
         if __N_CAND_LD__ < 32 or __N_CAND_HD__ < 32:
             raise Exception("fastSNE: __N_CAND_LD__ and __N_CAND_HD__ must be at least 32 (and preferably a multiple of 32). Change the values of __N_CAND_LD__ and __N_CAND_HD__ in cuda_kernels.py")
         
+        if __N_CAND_LD__ > __Kld__:
+            raise Exception("fastSNE: __N_CAND_LD__ must be smaller than __Kld__ (the number of neighbours in LD). Change the value of __N_CAND_LD__ in cuda_kernels.py")
+        if __N_CAND_HD__ > __Khd__:
+            raise Exception("fastSNE: __N_CAND_HD__ must be smaller than __Khd__ (the number of neighbours in HD). Change the value of __N_CAND_HD__ in cuda_kernels.py")
+
         # on CPU
         self.N        = N
         self.Mhd      = M
@@ -533,6 +538,10 @@ class fastSNE:
         #    - then refine KNN in LD space
         self.low_dim_updateSim_and_refineKNN(read_Xld, knn_LD_read, knn_HD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, neighbours_sumSnorms_LD, self.kern_alpha, stream_neigh_LD)
 
+        # sync streams
+        verify_neighdists(read_Xld, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
+        print("verification ok")
+        1/0
 
         # 2/  - find candidate neighbours for HD space, compute their distances
         #     - partial sort (ascending this time: closeby = to the left)
@@ -660,7 +669,7 @@ class fastSNE:
         block_shape = self.Kshapes2d_NxNcandLD_threads.block_x, self.Kshapes2d_NxNcandLD_threads.block_y, 1
         grid_shape  = self.Kshapes2d_NxNcandLD_threads.grid_x_size, self.Kshapes2d_NxNcandLD_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxNcandLD_threads.smem_n_bytes_per_block
-        self.candidates_LD_generate_and_sort_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_HD_read, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+        self.candidates_LD_generate_and_sort_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, knn_HD_read, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         # 4. finishing the similarity nominators reduction, with multi-level reductions
         neighbours_sumSnorms_LD.async_reduce(stream)
         
@@ -760,7 +769,7 @@ class fastSNE:
         #  N x __N_CAND_LD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_LD__
         block_x     = __N_CAND_LD__
-        smem_n_float32_per_thread = 8 
+        smem_n_float32_per_thread = 10 
         smem_const_additional = Mld
         self.Kshapes2d_NxNcandLD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
         #  N x __N_CAND_HD__ threads, 1d grid, 2d block
