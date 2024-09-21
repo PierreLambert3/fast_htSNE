@@ -498,7 +498,7 @@ __global__ void kernel_doubleSumReduction_one_step(double* input_vector, double*
 // -------------------------------------  candidate neighbours  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
 // block x : candidate number   block y : observation number
-__global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read, uint32_t* knn_HD_read, float* candidate_dists_LD, uint32_t* candidate_idx_LD, uint32_t seed_shared){
+__global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read, uint32_t* knn_HD_read, uint32_t seed_shared){
     extern __shared__ float smem_LD_candidates[];
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
@@ -512,7 +512,8 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     // ------- init  shared memory -------
     float*    X_i             = &smem_LD_candidates[obs_i_in_block * Mld];
     float*    cand_dists      = &smem_LD_candidates[n_obs_in_block * Mld + obs_i_in_block*N_CAND_LD];
-    float*    float_cand_idxs = &smem_LD_candidates[n_obs_in_block * Mld + n_obs_in_block*N_CAND_LD + obs_i_in_block*N_CAND_LD];
+    //float*    cand_idxs_float = &smem_LD_candidates[n_obs_in_block * Mld + n_obs_in_block*N_CAND_LD + obs_i_in_block*N_CAND_LD];
+    uint32_t*    cand_idx     = (uint32_t*) &smem_LD_candidates[n_obs_in_block * Mld + n_obs_in_block*N_CAND_LD + obs_i_in_block*N_CAND_LD];
     if(N_CAND_LD >= Mld){
         if(cand_number < Mld){
             float Xi_m = Xld_read[obs_i_global * Mld + cand_number];
@@ -549,33 +550,31 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
         uint32_t neighbour = knn_HD_read[obs_i_global*KHD + r1];
         cand_i = knn_HD_read[neighbour*KHD + r2];
     }
-    float_cand_idxs[cand_number] = (float) cand_i;
+    while(cand_i == obs_i_global){
+        cand_i = random_uint32_t_xorshift32(&seed_local) % N;
+    }
+    // cand_idxs_float[cand_number] = (float) cand_i;
+    cand_idx[cand_number] = cand_i;
     // ------- compute the distance to the candidate -------
     float* X_cand = &Xld_read[cand_i * Mld];
     float dist = squared_euclidean_distance(X_i, X_cand, Mld);
     cand_dists[cand_number] = dist;
+    __syncthreads();
     // -------  approximate sorting, ascending this time (opposite to neighbour sort)  --------
-    reduce1d_argmin_float(cand_dists, float_cand_idxs, N_CAND_LD, cand_number);
+    /*reduce1d_argmin_float(cand_dists, cand_idxs_float, N_CAND_LD, cand_number);
     bool cand_divisible_by_2 = (cand_number % 2) == 0;
     bool cand_divisible_by_3 = (cand_number % 3) == 0;
-    magicSwaps_global_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, seed_shared);
-    magicSwaps_local_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, cand_divisible_by_3);
+    magicSwaps_global_ascending(cand_dists, cand_idxs_float, cand_number, N_CAND_LD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, cand_idxs_float, cand_number, N_CAND_LD, cand_divisible_by_2, cand_divisible_by_3);
     seed_shared = (seed_shared / 2u) + 209383u;
-    magicSwaps_global_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, seed_shared);
-    magicSwaps_local_ascending(cand_dists, float_cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, cand_divisible_by_3);
+    magicSwaps_global_ascending(cand_dists, cand_idxs_float, cand_number, N_CAND_LD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, cand_idxs_float, cand_number, N_CAND_LD, cand_divisible_by_2, cand_divisible_by_3);
+    */
     // -------  write the results to global memory  --------
     __syncthreads();
-    candidate_dists_LD[obs_i_global*N_CAND_LD + cand_number] = cand_dists[cand_number];
-    candidate_idx_LD[obs_i_global*N_CAND_LD + cand_number]   = (uint32_t) float_cand_idxs[cand_number];
     return;
 }
 
-__global__ void candidates_LD_insert(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_write, float* candidate_dists_LD, uint32_t* candidate_idx_LD, uint32_t seed){
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if(i >= N){
-        return;}
-    return;
-}
 
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  neighbour dists  ------------------------------------------

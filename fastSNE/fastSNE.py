@@ -12,6 +12,8 @@ import pycuda.gpuarray as gpuarray
 
 from fastSNE.cuda_kernels import all_the_cuda_code
 
+__DEVICE_NUMBER__ = 0 # the GPU device to use
+
 __MIN_PERPLEXITY__ = 1.5
 __MAX_KERNEL_ALPHA__ = 100.0
 __MIN_KERNEL_ALPHA__ = 0.05
@@ -37,6 +39,75 @@ def generate_orthogonal_matrix(Mhd, Mld):
     std = np.std(Q, axis=0)
     target_std = 1.0
     return Q * (target_std / std)
+
+
+class SumGpu_double:
+    def __init__(self, N, compiled_cuda_code, cuda_device_attributes):
+        self.kernel_doubleSumReduction_one_step = compiled_cuda_code.get_function("kernel_doubleSumReduction_one_step")
+        self.N = N
+        self.L_Kshapes   = []
+        self.L_lvl_sizes = []
+        size_at_level = N
+        while size_at_level > 1:
+            start_size      = size_at_level
+            size_at_level   = size_at_level // cuda_device_attributes[cuda.device_attribute.MAX_THREADS_PER_BLOCK]
+            if size_at_level == 0:
+                size_at_level = 1
+            n_threads   = start_size
+            multiple_of = 32 if n_threads > 32 else 1
+            smem_n_float32_per_thread = 2 # reduce using double precision: 2x32bits per item
+            Kshape = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes, multiple_of)
+            Kshape.grid_y_size = 1
+            self.L_Kshapes.append(Kshape)
+            self.L_lvl_sizes.append(np.uint32(start_size))
+        self.lvl1_ = gpuarray.to_gpu(np.zeros(N, dtype=np.double))
+        self.lvl2_ = None
+        self.lvl3_ = None
+        self.lvl4_ = None
+        for level, shapes in enumerate(self.L_Kshapes):
+            if level == 0:
+                self.lvl2_ = gpuarray.to_gpu(np.zeros(shapes.grid_x_size, dtype=np.double))
+            elif level == 1:
+                self.lvl3_ = gpuarray.to_gpu(np.zeros(shapes.grid_x_size, dtype=np.double))
+            elif level == 2:
+                self.lvl4_ = gpuarray.to_gpu(np.zeros(shapes.grid_x_size, dtype=np.double))
+        self.resultArr_async = np.zeros((1,), dtype=np.double)
+    
+    def get(self): # this supposes taht a stream sync was done between the last async copy and this get 
+        return self.resultArr_async[0]
+
+    def async_reduce(self, stream):
+        # compute the sum of the nominators of the LD neighbours
+        n_levels = len(self.L_Kshapes)
+        for level in range(n_levels):
+            Kshape       = self.L_Kshapes[level]
+            block_shape  = Kshape.threads_per_block, 1, 1
+            grid_shape   = Kshape.grid_x_size, Kshape.grid_y_size, 1
+            smem_n_bytes = Kshape.smem_n_bytes_per_block
+            array_to_reduce = None
+            array_result    = None
+            if level == 0:
+                array_to_reduce = self.lvl1_
+                array_result    = self.lvl2_
+                """ # cpy array_to_reduce to a new cpu array:
+                cpu_array_N_doubles = np.zeros((self.N,), dtype=np.double)
+                cuda.memcpy_dtoh(cpu_array_N_doubles, array_to_reduce.gpudata)
+                # sync device
+                stream.synchronize()
+                # sum the array
+                sum_arr = np.sum(cpu_array_N_doubles)
+                print("\nsum_arr: ", sum_arr) """
+            elif level == 1:
+                array_to_reduce = self.lvl2_
+                array_result    = self.lvl3_
+            elif level == 2:
+                array_to_reduce = self.lvl3_
+                array_result    = self.lvl4_
+            input_size = self.L_lvl_sizes[level]
+            self.kernel_doubleSumReduction_one_step(array_to_reduce, array_result, input_size, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
+            if level == n_levels - 1:
+                # copy result to cpu once done
+                cuda.memcpy_dtoh_async(self.resultArr_async, array_result.gpudata, stream)
 
 class Kernel_shapes:
     def __init__(self, N_threads_total, threads_per_block_multiple_of, smem_n_float32_per_thread, cuda_device_attributes, constant_additional_smem_n_float32):
@@ -171,7 +242,7 @@ class fastSNE:
         self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
         self.cpu_Xld = np.dot(Xhd, self.linear_projection_now).astype(np.float32)
         # determine grid shapes, block shapes, smem size for each CUDA kernels & compile kernels
-        self.configue_and_initialise_CUDA_kernels_please(__Khd__, __Kld__, self.Mhd, self.Mld)
+        self.configue_and_initialise_CUDA_kernels_please(__Khd__, __Kld__, self.Mhd, self.Mld, device_number=__DEVICE_NUMBER__)
         # cuda streams
         stream_minMax   = cuda.Stream() # used in GUI mode
         stream_neigh_HD = cuda.Stream()
@@ -205,8 +276,6 @@ class fastSNE:
         cuda_sqdists_HD_B       = gpuarray.to_gpu(np.zeros((N, __Khd__), dtype=np.float32))  # TODO: init this
         cuda_farthest_dist_HD_A = gpuarray.to_gpu(np.ones(N, dtype=np.float32))              # TODO: init this
         cuda_farthest_dist_HD_B = gpuarray.to_gpu(np.ones(N, dtype=np.float32))              # TODO: init this
-        cuda_candidate_idx_HD   = gpuarray.to_gpu(np.zeros((N, __N_CAND_HD__), dtype=np.uint32)) 
-        cuda_candidate_dists_HD = gpuarray.to_gpu(np.zeros((N, __N_CAND_HD__), dtype=np.float32)) 
 
         cuda_Xld_true_A           = gpuarray.to_gpu(self.cpu_Xld)
         cuda_Xld_true_B           = gpuarray.to_gpu(self.cpu_Xld)
@@ -220,20 +289,7 @@ class fastSNE:
         cuda_simiNominators_LD_B  = gpuarray.to_gpu(np.zeros((N, __Kld__), dtype=np.float32)) # TODO: init this
         cuda_farthest_dist_LD_A   = gpuarray.to_gpu(np.ones(N, dtype=np.float32))             # TODO: init this
         cuda_farthest_dist_LD_B   = gpuarray.to_gpu(np.ones(N, dtype=np.float32))             # TODO: init this
-        cuda_candidate_idx_LD     = gpuarray.to_gpu(np.zeros((N, __N_CAND_LD__), dtype=np.uint32)) 
-        cuda_candidate_dists_LD   = gpuarray.to_gpu(np.zeros((N, __N_CAND_LD__), dtype=np.float32))
-
-        cuda_lvl1_sumSimiNominators_LD = gpuarray.to_gpu(np.zeros(N, dtype=np.double)) # TODO: init this
-        cuda_lvl2_sumSimiNominators_LD = None
-        cuda_lvl3_sumSimiNominators_LD = None
-        cuda_lvl4_sumSimiNominators_LD = None
-        for level, shapes in enumerate(self.L_Kshapes_bigDenomReductions):
-            if level == 0:
-                cuda_lvl2_sumSimiNominators_LD = gpuarray.to_gpu(np.zeros(shapes.grid_x_size, dtype=np.double))
-            elif level == 1:
-                cuda_lvl3_sumSimiNominators_LD = gpuarray.to_gpu(np.zeros(shapes.grid_x_size, dtype=np.double))
-            elif level == 2:
-                cuda_lvl4_sumSimiNominators_LD = gpuarray.to_gpu(np.zeros(shapes.grid_x_size, dtype=np.double))
+        neighbours_sumSnorms_LD = SumGpu_double(self.N, self.compiled_cuda_code, cuda.Device(__DEVICE_NUMBER__).get_attributes())
 
         big_dic = {
             "cuda_Xhd"                : cuda_Xhd,
@@ -243,8 +299,6 @@ class fastSNE:
             "cuda_sqdists_HD_B"       : cuda_sqdists_HD_B,
             "cuda_farthest_dist_HD_A" : cuda_farthest_dist_HD_A,
             "cuda_farthest_dist_HD_B" : cuda_farthest_dist_HD_B,
-            "cuda_candidate_dists_HD" : cuda_candidate_dists_HD,
-            "cuda_candidate_idx_HD"   : cuda_candidate_idx_HD,
             "cuda_Xld_true_A"         : cuda_Xld_true_A,
             "cuda_Xld_true_B"         : cuda_Xld_true_B,
             "cuda_Xld_nest"           : cuda_Xld_nest,
@@ -255,17 +309,12 @@ class fastSNE:
             "cuda_sqdists_LD_B"       : cuda_sqdists_LD_B,
             "cuda_simiNominators_LD_A": cuda_simiNominators_LD_A,
             "cuda_simiNominators_LD_B": cuda_simiNominators_LD_B,
-            "cuda_lvl1_sumSimiNominators_LD": cuda_lvl1_sumSimiNominators_LD,
-            "cuda_lvl2_sumSimiNominators_LD": cuda_lvl2_sumSimiNominators_LD,
-            "cuda_lvl3_sumSimiNominators_LD": cuda_lvl3_sumSimiNominators_LD,
-            "cuda_lvl4_sumSimiNominators_LD": cuda_lvl4_sumSimiNominators_LD,
+            "neighbours_sumSnorms_LD" : neighbours_sumSnorms_LD,
             "cuda_farthest_dist_LD_A" : cuda_farthest_dist_LD_A,
             "cuda_farthest_dist_LD_B" : cuda_farthest_dist_LD_B,
-            "cuda_candidate_dists_LD" : cuda_candidate_dists_LD,
-            "cuda_candidate_idx_LD"   : cuda_candidate_idx_LD,
             "all_streams"             : all_streams
         }
-
+        self.periodic_1000 = 0
         # launch the tSNE optimisation
         if self.with_GUI:
             self.fit_with_gui(Y, big_dic)
@@ -287,7 +336,6 @@ class fastSNE:
         cuda_knn_HD_B, cuda_sqdists_HD_B, cuda_farthest_dist_HD_B, cuda_Xld_true_B = [big_dic[key] for key in ["cuda_knn_HD_B", "cuda_sqdists_HD_B", "cuda_farthest_dist_HD_B", "cuda_Xld_true_B"]]
         cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A = [big_dic[key] for key in ["cuda_knn_LD_A", "cuda_sqdists_LD_A", "cuda_farthest_dist_LD_A"]]
         cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B = [big_dic[key] for key in ["cuda_knn_LD_B", "cuda_sqdists_LD_B", "cuda_farthest_dist_LD_B"]]
-        cuda_candidate_dists_LD, cuda_candidate_idx_LD, cuda_candidate_dists_HD, cuda_candidate_idx_HD = [big_dic[key] for key in ["cuda_candidate_dists_LD", "cuda_candidate_idx_LD", "cuda_candidate_dists_HD", "cuda_candidate_idx_HD"]]
         all_streams = big_dic["all_streams"]
         stream_minMax, stream_neigh_HD , stream_neigh_LD, stream_grads = all_streams
         read_Xld      = cuda_Xld_true_A
@@ -304,26 +352,19 @@ class fastSNE:
         sqdists_LD_write = cuda_sqdists_LD_B
         farthest_dist_LD_read = cuda_farthest_dist_LD_A
         farthest_dist_LD_write = cuda_farthest_dist_LD_B
-        lvl1_neighbours_sumSimiNominators_LD = big_dic["cuda_lvl1_sumSimiNominators_LD"]
-        lvl2_neighbours_sumSimiNominators_LD = big_dic["cuda_lvl2_sumSimiNominators_LD"]
-        lvl3_neighbours_sumSimiNominators_LD = big_dic["cuda_lvl3_sumSimiNominators_LD"]
-        lvl4_neighbours_sumSimiNominators_LD = big_dic["cuda_lvl4_sumSimiNominators_LD"]
+        neighbours_sumSnorms_LD = big_dic["neighbours_sumSnorms_LD"]
+        
         simiNominators_LD_A = big_dic["cuda_simiNominators_LD_A"]
         simiNominators_LD_B = big_dic["cuda_simiNominators_LD_B"]
-        denom_LD_neighboursPart_A = gpuarray.to_gpu(np.zeros((1,), dtype=np.float32))
-        denom_LD_neighboursPart_B = gpuarray.to_gpu(np.zeros((1,), dtype=np.float32))
         self.cpu_double_scalar = np.zeros((1,), dtype=np.double)
-        denom_LD_neighboursPart_write = denom_LD_neighboursPart_B
 
         # init neighbours dists , fartherst dists, and simiNominators
-        n_levels = len(self.L_Kshapes_bigDenomReductions)
-        self.fill_all_sqdists_LD(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_HD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, simiNominators_LD_B, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_B, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
-        self.fill_all_sqdists_LD(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_HD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, simiNominators_LD_A, lvl1_neighbours_sumSimiNominators_LD, lvl2_neighbours_sumSimiNominators_LD, lvl3_neighbours_sumSimiNominators_LD, lvl4_neighbours_sumSimiNominators_LD, denom_LD_neighboursPart_A, cuda_candidate_dists_LD, cuda_candidate_idx_LD, self.kern_alpha, stream_neigh_LD)
+        self.low_dim_updateSim_and_refineKNN(cuda_Xld_true_A, cuda_knn_LD_A, cuda_knn_HD_A, cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B, simiNominators_LD_B, neighbours_sumSnorms_LD, self.kern_alpha, stream_neigh_LD)
+        self.low_dim_updateSim_and_refineKNN(cuda_Xld_true_B, cuda_knn_LD_B, cuda_knn_HD_B, cuda_knn_LD_A, cuda_sqdists_LD_A, cuda_farthest_dist_LD_A, simiNominators_LD_A, neighbours_sumSnorms_LD, self.kern_alpha, stream_neigh_LD)
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_A, cuda_knn_HD_B, cuda_sqdists_HD_B, cuda_farthest_dist_HD_B, stream_neigh_HD)
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_B, cuda_knn_HD_A, cuda_sqdists_HD_A, cuda_farthest_dist_HD_A, stream_neigh_HD)
         stream_neigh_HD.synchronize()
         stream_neigh_LD.synchronize()
-
 
 
         # 1. configure the process launch mode 
@@ -389,8 +430,6 @@ class fastSNE:
                 farthest_dist_LD_write = cuda_farthest_dist_LD_B
                 simiNominators_LD_read = simiNominators_LD_A
                 simiNominators_LD_write = simiNominators_LD_B
-                denom_LD_neighboursPart_read = denom_LD_neighboursPart_A
-                denom_LD_neighboursPart_write = denom_LD_neighboursPart_B
             else:
                 read_Xld     = cuda_Xld_true_B
                 write_Xld    = cuda_Xld_true_A
@@ -408,28 +447,18 @@ class fastSNE:
                 farthest_dist_LD_write = cuda_farthest_dist_LD_A
                 simiNominators_LD_read = simiNominators_LD_B
                 simiNominators_LD_write = simiNominators_LD_A
-                denom_LD_neighboursPart_read = denom_LD_neighboursPart_B
-                denom_LD_neighboursPart_write = denom_LD_neighboursPart_A
 
-            # now that it is synced, save the sum of the nominators of the LD neighborus for the denominator computation
-            stream_neigh_LD.synchronize() # only sync every 4 iterations
-            device_ptr = None
-            if n_levels == 1:
-                device_ptr = lvl2_neighbours_sumSimiNominators_LD.gpudata
-            if n_levels == 2:
-                device_ptr = lvl3_neighbours_sumSimiNominators_LD.gpudata
-            if n_levels == 3:
-                device_ptr = lvl4_neighbours_sumSimiNominators_LD.gpudata
-            cuda.memcpy_dtoh(self.cpu_double_scalar, device_ptr)
-            denom_LD_neighboursPart_write[0] = float(self.cpu_double_scalar[0])
 
             # sync all streams (else read/writes will conflict with versions A and B)
-            stream_neigh_HD.synchronize() # only sync every 4 iterations
+            stream_neigh_LD.synchronize()
+            stream_neigh_HD.synchronize()
             stream_minMax.synchronize()
             stream_grads.synchronize()
+            denom_LD_neighbours = float(neighbours_sumSnorms_LD.get())
+            print("neighbours denoms part: ",  denom_LD_neighbours)
 
             # update hyperparameters (if HD config changed: recompute distances to neighbours & farthest distances)
-            self.kern_alpha   = kernel_alpha.value
+            self.kern_alpha   = np.float32(kernel_alpha.value)
             self.attrac_mult  = attrac_mult.value
             new_perplexity    = perplexity.value
             new_dist_metric   = dist_metric.value
@@ -438,11 +467,12 @@ class fastSNE:
             self.dist_metric  = new_dist_metric
 
             if HD_config_changed:
-                self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_A, cuda_knn_HD_B, cuda_sqdists_HD_B, cuda_farthest_dist_HD_B, stream_neigh_HD)
-                self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_B, cuda_knn_HD_A, cuda_sqdists_HD_A, cuda_farthest_dist_HD_A, stream_neigh_HD)
+                self.fill_all_sqdists_HD(cuda_Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, stream_neigh_HD)
+                self.fill_all_sqdists_HD(cuda_Xhd, knn_HD_write, knn_HD_read, sqdists_HD_read, farthest_dist_HD_read, stream_neigh_HD)
                 stream_neigh_HD.synchronize()
 
-            self.one_iteration(warmup, cuda_Xhd, read_Xld, write_Xld, cuda_Xld_nest, cuda_Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write, farthest_dist_HD_read, farthest_dist_HD_write, cuda_candidate_dists_HD, knn_LD_read, knn_LD_write, sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, cuda_candidate_idx_HD, stream_neigh_HD, stream_neigh_LD, stream_grads)
+            # if not isPhaseA:
+            self.one_iteration(warmup, cuda_Xhd, read_Xld, write_Xld, cuda_Xld_nest, cuda_Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write, farthest_dist_HD_read, farthest_dist_HD_write, knn_LD_read, knn_LD_write, sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, stream_neigh_HD, stream_neigh_LD, simiNominators_LD_write, neighbours_sumSnorms_LD, stream_grads)
 
             # GUI communication & preparation of the data for the GUI
             if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
@@ -468,25 +498,12 @@ class fastSNE:
                     busy_copying__for_GUI = True
                     iteration.value = iteration_int
             gui_data_prep_phase = (gui_data_prep_phase + 1) % 2
-            # else: # copy cuda_Xld_temp to cpu_Xld_arr_on_smem, if the GUI is ready
-            #     gui_done = False
-            #     busy_copying__for_GUI = False
-            #     with points_rendering_finished.get_lock():
-            #         gui_done = points_rendering_finished.value
-            #     if gui_done:
-            #         cuda_Xld_temp_Xld.get_async(stream=stream_minMax, ary=cpu_Xld_arr_on_smem)
-            #         busy_copying__for_GUI = True
-            #         iteration.value = iteration_int
-            # gui_data_prep_phase = (gui_data_prep_phase + 1) % 3
 
             isPhaseA = not isPhaseA  # ONLY CHANGE EVERY 4 ITERATION (because 4 grads per neigh update)
             iteration_int += 1
 
-            if warmup:
-                if iteration_int >= 20000:
-                    warmup = False
-                if iteration_int % 20 == 0:
-                    self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
+            if warmup and iteration_int >= 20000:
+                warmup = False
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
         process_gui.join()
@@ -498,31 +515,32 @@ class fastSNE:
         1/0
 
     # all CUDA 'kernels' run in parallel, sync at the start of the iterations loop outside of this function
-    def one_iteration(self, warmup, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write, farthest_dist_HD_read, farthest_dist_HD_write, candidate_dists_HD, knn_LD_read, knn_LD_write, sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, candidate_dists_LD, cuda_candidate_idx_LD, cuda_candidate_idx_HD, stream_neigh_HD, stream_neigh_LD, stream_grads):
+    def one_iteration(self, warmup, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write, farthest_dist_HD_read, farthest_dist_HD_write,  knn_LD_read, knn_LD_write, sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, stream_neigh_HD, stream_neigh_LD, simiNominators_LD_write, neighbours_sumSnorms_LD, stream_grads):
+        self.periodic_1000 = (self.periodic_1000 + 1) % 1000
         # 0/ - gradient computations & update positions
+        alpha = 0.05
         if warmup:
-            self.linear_projection_now = 0.93 * self.linear_projection_now + 0.07 * self.linear_projection_target
-            self.cpu_Xld = np.dot(self.Xhd, self.linear_projection_now).astype(np.float32)
-            write_Xld.set_async(self.cpu_Xld, stream=stream_grads)
+            if (self.periodic_1000 % 70) == 0:
+                self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
+            if (self.periodic_1000 % 5) == 0:
+                self.linear_projection_now = (1.0 - alpha) * self.linear_projection_now + alpha * self.linear_projection_target
+                self.cpu_Xld = np.dot(self.Xhd, self.linear_projection_now).astype(np.float32)
+                write_Xld.set_async(self.cpu_Xld, stream=stream_grads)
         else:
-            pass
+            print("launch gradients kernel")
         
-        # 1/ - update LD neighbour distances
-        #    -  partial sort (descending because we deermine which is the furthest one)
-        #    -  prepare next iteration's LD kernels, and compute their sum (double type!)
+        # 1/ - first update LD neighbour dists & simiNominators
+        #    - then refine KNN in LD space
+        self.low_dim_updateSim_and_refineKNN(read_Xld, knn_LD_read, knn_HD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, neighbours_sumSnorms_LD, self.kern_alpha, stream_neigh_LD)
+
 
         # 2/  - find candidate neighbours for HD space, compute their distances
         #     - partial sort (ascending this time: closeby = to the left)
         #     - update knn_HD_write: fixed & fast insertion patterns (SYNCTHREADS BETWEEN EACH ONE!)
         #     - keep track of i's that had a neighbour update (dont reset the flag: accumulate the changed flag across iterations)
-        
-        # 3/  - find candidate neighbours for LD space, compute their distances
-        #     - partial sort (ascending this time: closeby = to the left)
-        #     - update knn_LD_write: fixed & fast insertion patterns (SYNCTHREADS BETWEEN EACH ONE!)
+        #     - parallel reduction sum on the number of i's that had a neighbour update in HD
 
-        # 4/  - parallel reduction sum on the number of i's that had a neighbour update in HD
-
-        # 5/  - if rand() < 0.02 + pct_HD_changed:
+        # 5/  - accumulated percent of changed is high engough: update HD similarities
         #     - for each i that has a 'HD neigh changed' flag activated (which is persistant across iterations):
         #     - recompute radius and Pasym 
         #     - reset 'HD neigh changed' flags
@@ -629,52 +647,26 @@ class fastSNE:
         print("this should only be called once at init")
         # verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream)
 
-    def fill_all_sqdists_LD(self, Xld_read, knn_LD_read, knn_HD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cuda_lvl2_sumSimiNominators_LD, cuda_lvl3_sumSimiNominators_LD, cuda_lvl4_sumSimiNominators_LD, denom_LD_neighboursPart_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, cauchy_alpha, stream):
+    def low_dim_updateSim_and_refineKNN(self, Xld_read, knn_LD_read, knn_HD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, neighbours_sumSnorms_LD, cauchy_alpha, stream):
         # 1.  squared dists to LD neighbours, sort neighbours, find farthest dists
         #     compute similarity nominators and first reduction on them for each i
         block_shape  = self.Kshapes2d_NxKld_threads.block_x, self.Kshapes2d_NxKld_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKld_threads.grid_x_size, self.Kshapes2d_NxKld_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKld_threads.smem_n_bytes_per_block
         seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 287378
-        self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, cuda_lvl1_sumSimiNominators_LD, cauchy_alpha, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-        
+        self.all_LD_sqdists_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, neighbours_sumSnorms_LD.lvl1_, cauchy_alpha, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         # 2. candidate neighbours: generate, compute dists, and partial sort
         seed = (np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__)) // 3) + 79823
         block_shape = self.Kshapes2d_NxNcandLD_threads.block_x, self.Kshapes2d_NxNcandLD_threads.block_y, 1
         grid_shape  = self.Kshapes2d_NxNcandLD_threads.grid_x_size, self.Kshapes2d_NxNcandLD_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxNcandLD_threads.smem_n_bytes_per_block
-        self.candidates_LD_generate_and_sort_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_HD_read, cuda_candidate_dists_LD, cuda_candidate_idx_LD, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-        # 3. candidate neighbours: insert using a loop (N threads = N)
-        block_shape  = self.Kshapes_N_threads.threads_per_block, 1, 1
-        grid_shape   = self.Kshapes_N_threads.grid_x_size, self.Kshapes_N_threads.grid_y_size, 1
-        smem_n_bytes = self.Kshapes_N_threads.smem_n_bytes_per_block
-        self.candidates_LD_insert_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_write, cuda_candidate_dists_LD, cuda_candidate_idx_LD, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-
+        self.candidates_LD_generate_and_sort_cu(np.uint32(self.N), np.uint32(self.Mld), Xld_read, knn_LD_read, knn_HD_read, seed, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
         # 4. finishing the similarity nominators reduction, with multi-level reductions
-        n_levels = len(self.L_Kshapes_bigDenomReductions)
-        for level in range(n_levels):
-            Kshape       = self.L_Kshapes_bigDenomReductions[level]
-            block_shape  = Kshape.threads_per_block, 1, 1
-            grid_shape   = Kshape.grid_x_size, Kshape.grid_y_size, 1
-            smem_n_bytes = Kshape.smem_n_bytes_per_block
-            array_to_reduce = None
-            array_result    = None
-            if level == 0:
-                array_to_reduce = cuda_lvl1_sumSimiNominators_LD
-                array_result    = cuda_lvl2_sumSimiNominators_LD
-            elif level == 1:
-                array_to_reduce = cuda_lvl2_sumSimiNominators_LD
-                array_result    = cuda_lvl3_sumSimiNominators_LD
-            elif level == 2:
-                array_to_reduce = cuda_lvl3_sumSimiNominators_LD
-                array_result    = cuda_lvl4_sumSimiNominators_LD
-            input_size = self.L_lvl_sizes[level]
-            self.kernel_doubleSumReduction_one_step(array_to_reduce, array_result, input_size, block=block_shape, grid=grid_shape, stream=stream, shared=smem_n_bytes)
-
-
-    def configue_and_initialise_CUDA_kernels_please(self, Khd, Kld, Mhd, Mld):
+        neighbours_sumSnorms_LD.async_reduce(stream)
+        
+    def configue_and_initialise_CUDA_kernels_please(self, Khd, Kld, Mhd, Mld, device_number=0):
         N = self.N
-        cuda_device = cuda.Device(0)
+        cuda_device = cuda.Device(device_number)
         cuda_device_attributes = cuda_device.get_attributes()
 
         # ------------ 0. kernels used for getting the transpose of Xld  -------
@@ -768,7 +760,7 @@ class fastSNE:
         #  N x __N_CAND_LD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_LD__
         block_x     = __N_CAND_LD__
-        smem_n_float32_per_thread = 3 
+        smem_n_float32_per_thread = 8 
         smem_const_additional = Mld
         self.Kshapes2d_NxNcandLD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
         #  N x __N_CAND_HD__ threads, 1d grid, 2d block
@@ -778,23 +770,7 @@ class fastSNE:
         smem_const_additional = Mhd
         self.Kshapes2d_NxNcandHD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
         
-        # parallel reduction on the N-sized LD simi nominators
-        self.L_Kshapes_bigDenomReductions = []
-        self.L_lvl_sizes = []
-        size_at_level = N
-        while size_at_level > 1:
-            start_size      = size_at_level
-            size_at_level   = size_at_level // cuda_device_attributes[cuda.device_attribute.MAX_THREADS_PER_BLOCK]
-            if size_at_level == 0:
-                size_at_level = 1
-            after_reduction = size_at_level
-            n_threads   = start_size
-            multiple_of = 32 if n_threads > 32 else 1
-            smem_n_float32_per_thread = 2 # reduce using double precision: 2x32bits per item
-            Kshape = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes, Mhd)
-            Kshape.grid_y_size = 1
-            self.L_Kshapes_bigDenomReductions.append(Kshape)
-            self.L_lvl_sizes.append(np.uint32(start_size))
+        
         
         # ------------ 3. kernels used for the tSNE gradients -------   
 
@@ -809,7 +785,6 @@ class fastSNE:
         self.all_HD_sqdists_custom_cu    = self.compiled_cuda_code.get_function("compute_all_HD_sqdists_custom")
         self.all_LD_sqdists_cu           = self.compiled_cuda_code.get_function("compute_all_LD_sqdists")
         self.candidates_LD_generate_and_sort_cu = self.compiled_cuda_code.get_function("candidates_LD_generate_and_sort")
-        self.candidates_LD_insert_cu          = self.compiled_cuda_code.get_function("candidates_LD_insert")
         self.kernel_doubleSumReduction_one_step = self.compiled_cuda_code.get_function("kernel_doubleSumReduction_one_step")
 
     def free_all_GPU_memory(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
