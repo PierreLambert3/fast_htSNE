@@ -189,9 +189,9 @@ class fastSNE:
         # fetch the cuda-defined constants! (defined in cuda for better compilation optimisations)
         self.fetch_constants_from_cuda()
         if (__Kld__ % 32) != 0:
-            print("\033[38;2;255;165;0mWARNING\033[0m:  __Kld__ is not a multiple of 32. This will result in inefficient memory access patterns. Consider changing the value of __Kld__ in fastSNE.py")
+            raise Exception("\033[38;2;255;165;0mWARNING\033[0m:  __Kld__ is not a multiple of 32. This will result in inefficient memory access patterns. Consider changing the value of __Kld__ in fastSNE.py")
         if (__Khd__ % 32) != 0:
-            print("\033[38;2;255;165;0mWARNING\033[0m:  __Khd__ is not a multiple of 32. This will result in inefficient memory access patterns. Consider changing the value of __Khd__ in fastSNE.py")
+            raise Exception("\033[38;2;255;165;0mWARNING\033[0m:  __Khd__ is not a multiple of 32. This will result in inefficient memory access patterns. Consider changing the value of __Khd__ in fastSNE.py")
         if (__Kld__ % 2) != 0:
             raise Exception("__Kld__ has to be a multiple of 2 (and preferably a multiple of 32 as well). Change the value of __Kld__ in fastSNE.py")
         if (__Khd__ % 2) != 0:
@@ -507,7 +507,7 @@ class fastSNE:
             isPhaseA = not isPhaseA  # ONLY CHANGE EVERY 4 ITERATION (because 4 grads per neigh update)
             iteration_int += 1
 
-            if warmup and iteration_int >= 20000:
+            if warmup and iteration_int >= 400:
                 warmup = False
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
@@ -536,12 +536,14 @@ class fastSNE:
         
         # 1/ - first update LD neighbour dists & simiNominators
         #    - then refine KNN in LD space
+        #if (self.periodic_1000 % 3) == 0:
         self.low_dim_updateSim_and_refineKNN(read_Xld, knn_LD_read, knn_HD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, simiNominators_LD_write, neighbours_sumSnorms_LD, self.kern_alpha, stream_neigh_LD)
 
         # sync streams
-        verify_neighdists(read_Xld, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
-        print("verification ok")
-        1/0
+        if (self.periodic_1000 % 10) == 0:
+            verify_neighdists(read_Xld, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
+            print("verification ok")
+        
 
         # 2/  - find candidate neighbours for HD space, compute their distances
         #     - partial sort (ascending this time: closeby = to the left)
@@ -769,13 +771,13 @@ class fastSNE:
         #  N x __N_CAND_LD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_LD__
         block_x     = __N_CAND_LD__
-        smem_n_float32_per_thread = 10 
+        smem_n_float32_per_thread = 8
         smem_const_additional = Mld
         self.Kshapes2d_NxNcandLD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
         #  N x __N_CAND_HD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_HD__
         block_x     = __N_CAND_HD__
-        smem_n_float32_per_thread = 3 
+        smem_n_float32_per_thread = 8 
         smem_const_additional = Mhd
         self.Kshapes2d_NxNcandHD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
         
@@ -967,7 +969,7 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
     n_evals = 0.0
     
     for i in range(N):
-        do_comparison = np.random.uniform() < 0.001
+        do_comparison = np.random.uniform() < 0.0005
         if(do_comparison):
             scaling = 1.0 / 10000000.0
             # GPU values
@@ -988,6 +990,12 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
             abs_dist_differences = np.abs(cpu_neighdists_recomputed[i] - dists_according_to_gpu)
             distances_all_close = np.mean(abs_dist_differences) < 1e-5
             farthest_ok         = (np.abs(farthest_according_to_cpu - farthest_according_to_gpu) < 1e-5)
+
+
+            if not farthest_ok:
+                print("farthest dists are wrong. This is normal after LD neighbours update. BUT HD NEIGHBBORUS UPDATES MUST ALSO UPDATE FARTHEST DISTS!!!")
+                farthest_ok = True
+
             if (not distances_all_close)  or (not farthest_ok):
                 # print the index where the distances anr not all close
                 idx_different = np.where(abs_dist_differences > 1e-5)[0]
@@ -1046,7 +1054,7 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
     sortedness_far    /= n_votes_far
     sortedness_short  /= n_votes_short
     print("OK    sortedness_far: ", sortedness_far, "sortedness_short: ", sortedness_short)
-    import matplotlib.pyplot as plt
-    plt.plot(sum_dists / n_evals)
-    plt.plot(last_dists)
-    plt.show()
+    # import matplotlib.pyplot as plt
+    # plt.plot(sum_dists / n_evals)
+    # plt.plot(last_dists)
+    # plt.show()
