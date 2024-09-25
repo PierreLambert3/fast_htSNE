@@ -9,6 +9,7 @@ all_the_cuda_code = """
 #define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
 #define KLD       (32u * 1u) 
 #define N_CAND_LD (32u)
+//#define N_CAND_HD (32u)
 #define N_CAND_HD (32u)
 
 __global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kld, uint32_t* n_cand_ld, uint32_t* n_cand_hd){
@@ -33,10 +34,35 @@ __device__ __forceinline__ uint32_t random_uint32_t_xorshift32(uint32_t* rand_st
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  distance metrics  -----------------------------------------
 // --------------------------------------------------------------------------------------------------
+
+__device__ __forceinline__ float squared_euclidean_distance_thresholed(float* X_i, float* X_j, uint32_t M, float threshold){
+    const uint32_t step_size = 6u;
+    uint32_t n_steps = (M + step_size - 1u) / step_size;
+    float dist = 0.0f;
+    for(uint32_t step = 0u; step < n_steps; step++){
+        uint32_t L = step * step_size;
+        uint32_t R = min(L + step_size, M);
+        for(uint32_t m = L; m < R; m++){
+            float Xi_m = X_i[m];
+            float Xj_m = X_j[m];
+            float diff = Xi_m - Xj_m;
+            float diffdiff = diff * diff;
+            dist = dist + diffdiff;
+        }
+        if(dist > threshold){
+            float estimated_dist = dist * (float) M / (float) R;
+            return 2.0f * estimated_dist;
+        }
+    }
+    return dist;
+}
+
 __device__ __forceinline__ float squared_euclidean_distance(float* X_i, float* X_j, uint32_t M){
     float dist = 0.0f;
     for(uint32_t m = 0; m < M; m++){
-        float diff = X_i[m] - X_j[m];
+        float Xi_m = X_i[m];
+        float Xj_m = X_j[m];
+        float diff = Xi_m - Xj_m;
         float diffdiff = diff * diff;
         dist = dist + diffdiff;
     }
@@ -128,6 +154,26 @@ __device__ __forceinline__ void reduce1d_minMax_float(float* vector_mins, float*
     // one warp remaining: no need to sync anymore
     if(i + stride < prev_len){
         warpReduce1d_minMax_float(vector_mins, vector_maxs, i, prev_len, stride);
+    }
+    __syncthreads();
+}
+
+__device__ __forceinline__ void reduce1d_minMax_float_noWarp(float* vector_mins, float* vector_maxs, uint32_t n, uint32_t i){
+    __syncthreads();
+    uint32_t prev_len = 2u * n;
+    uint32_t stride   = n;
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1_mins = vector_mins[i];
+            float value2_mins = vector_mins[i + stride];
+            float value1_maxs = vector_maxs[i];
+            float value2_maxs = vector_maxs[i + stride];
+            vector_mins[i]    = fminf(value1_mins, value2_mins);
+            vector_maxs[i]    = fmaxf(value1_maxs, value2_maxs);
+        }
+        __syncthreads();
     }
     __syncthreads();
 }
@@ -299,6 +345,38 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, uint32_t* p
     __syncthreads();
 }
 
+__device__ __forceinline__ void warpReduce1d_min_float(volatile float* vector, uint32_t i, uint32_t prev_len, uint32_t stride){
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            vector[i]    = fminf(value1, value2);
+        }
+    }
+}
+
+__device__ __forceinline__ void reduce1d_min_float(float* vector, uint32_t n, uint32_t i){
+    __syncthreads();
+    uint32_t prev_len = 2u * n;
+    uint32_t stride   = n;
+    while(stride > 32u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            vector[i]    = fminf(value1, value2);
+        }
+        __syncthreads();
+    }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_min_float(vector, i, prev_len, stride);
+    }
+}
+
 __device__ __forceinline__ void warpReduce1d_sum_float(volatile float* vector, uint32_t i, uint32_t prev_len, uint32_t stride){
     // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
     while(stride > 1u){
@@ -334,6 +412,42 @@ __device__ __forceinline__ void reduce1d_sum_float(float* vector, uint32_t n, ui
     __syncthreads();
 }
 
+
+__device__ __forceinline__ void warpReduce1d_max_float(volatile float* vector, uint32_t i, uint32_t prev_len, uint32_t stride){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            vector[i]    = fmaxf(value1, value2);
+        }
+    }
+}
+__device__ __forceinline__ void reduce1d_max_float(float* vector, uint32_t n, uint32_t i){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    __syncthreads();
+    uint32_t prev_len = 2u * n;
+    uint32_t stride   = n;
+    while(stride > 32u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            float value1 = vector[i];
+            float value2 = vector[i + stride];
+            vector[i]    = fmaxf(value1, value2);
+        }
+        __syncthreads();
+    }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_max_float(vector, i, prev_len, stride);
+    }
+    __syncthreads();
+}
+
+
 __device__ __forceinline__ void warpReduce1d_sum_double(volatile double* vector, uint32_t i, uint32_t prev_len, uint32_t stride){
     // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
     while(stride > 1u){
@@ -367,6 +481,42 @@ __device__ __forceinline__ void reduce1d_sum_double(double* vector, uint32_t n, 
         warpReduce1d_sum_double(vector, i, prev_len, stride);}
     __syncthreads();
 }
+
+__device__ __forceinline__ void warpReduce1d_sum_uint32_t(volatile uint32_t* vector, uint32_t i, uint32_t prev_len, uint32_t stride){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    while(stride > 1u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            uint32_t value1 = vector[i];
+            uint32_t value2 = vector[i + stride];
+            vector[i]    = value1 + value2;
+        }
+    }
+}
+
+__device__ __forceinline__ void reduce1d_sum_uint32_t(uint32_t* vector, uint32_t n, uint32_t i){
+    // IF 2-d BLOCKS: the 1st dimension must be the one that is reduced !!!
+    __syncthreads();
+    uint32_t prev_len = 2u * n;
+    uint32_t stride   = n;
+    while(stride > 32u){
+        prev_len = stride;
+        stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
+        if(i + stride < prev_len){
+            uint32_t value1 = vector[i];
+            uint32_t value2 = vector[i + stride];
+            vector[i]    = value1 + value2;
+        }
+        __syncthreads();
+    }
+    // one warp remaining: no need to sync anymore
+    if(i + stride < prev_len){
+        warpReduce1d_sum_uint32_t(vector, i, prev_len, stride);
+    }
+    __syncthreads();
+}
+
 
 
 
@@ -465,7 +615,6 @@ __device__ __forceinline__ void magicSwaps_global(float* vector, uint32_t* perms
     }
 }
 
-
 __device__ __forceinline__ void magicSwaps_local_ascending(float* vector, uint32_t* perms, uint32_t k, uint32_t _K_, bool k_divisible_by_2, bool k_divisible_by_3){
     __syncthreads();
     if(k_divisible_by_2){ 
@@ -553,6 +702,68 @@ __device__ __forceinline__ void magicSwaps_global_ascending(float* vector, uint3
     }
 }
 
+
+
+__global__ void kernel_floatMaxReduction_one_step(float* input_vector, float* output_vector, uint32_t input_size){
+    extern __shared__ float smem_floatMaxReduction_one_step[];
+    uint32_t i_global = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t i_local = threadIdx.x;
+    uint32_t globalmem_idx = i_global;
+    if(globalmem_idx >= input_size){
+        globalmem_idx = i_local;
+        if(globalmem_idx >= input_size){
+            globalmem_idx = globalmem_idx / 2u;
+            if(globalmem_idx >= input_size){
+                globalmem_idx = 0u;
+            }
+        }
+    }
+    //smem_floatMaxReduction_one_step[i_local] = input_vector[idx];
+    smem_floatMaxReduction_one_step[i_local] = input_vector[globalmem_idx];
+    //smem_floatMaxReduction_one_step[i_local] = (i_global < input_size) ? input_vector[i_global] : input_vector[input_size-1];
+    __syncthreads();
+    reduce1d_max_float(smem_floatMaxReduction_one_step, blockDim.x, i_local);
+    if(i_local == 0){
+        output_vector[blockIdx.x] = smem_floatMaxReduction_one_step[0];
+    }
+}
+
+__global__ void kernel_floatMinReduction_one_step(float* input_vector, float* output_vector, uint32_t input_size){
+    extern __shared__ float smem_floatMinReduction_one_step[];
+    uint32_t i_global = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t i_local = threadIdx.x;
+    uint32_t globalmem_idx = i_global;
+    if(globalmem_idx >= input_size){
+        globalmem_idx = i_local;
+        if(globalmem_idx >= input_size){
+            globalmem_idx = globalmem_idx / 2u;
+            if(globalmem_idx >= input_size){
+                globalmem_idx = 0u;
+            }
+        }
+    }
+    smem_floatMinReduction_one_step[i_local] = input_vector[globalmem_idx];
+    __syncthreads();
+    reduce1d_min_float(smem_floatMinReduction_one_step, blockDim.x, i_local);
+    if(i_local == 0){
+        output_vector[blockIdx.x] = smem_floatMinReduction_one_step[0];
+    }
+}
+
+
+
+__global__ void kernel_floatSumReduction_one_step(float* input_vector, float* output_vector, uint32_t input_size){
+    extern __shared__ float smem_floatSumReduction_one_step[];
+    uint32_t i_global = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t i_local = threadIdx.x;
+    smem_floatSumReduction_one_step[i_local] = (i_global < input_size) ? input_vector[i_global] : 0.0f;
+    __syncthreads();
+    reduce1d_sum_float(smem_floatSumReduction_one_step, blockDim.x, i_local);
+    if(i_local == 0){
+        output_vector[blockIdx.x] = smem_floatSumReduction_one_step[0];
+    }
+}
+
 __global__ void kernel_doubleSumReduction_one_step(double* input_vector, double* output_vector, uint32_t input_size){
     extern __shared__ double smem_doubleSumReduction_one_step[];
     uint32_t i_global = blockIdx.x * blockDim.x + threadIdx.x;
@@ -565,16 +776,288 @@ __global__ void kernel_doubleSumReduction_one_step(double* input_vector, double*
     }
 }
 
+
+__global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uint32_t* output_vector, uint32_t input_size){
+    extern __shared__ uint32_t smem_uint32_tSumReduction_one_step[];
+    uint32_t i_global = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t i_local = threadIdx.x;
+    smem_uint32_tSumReduction_one_step[i_local] = (i_global < input_size) ? input_vector[i_global] : 0.0;
+    __syncthreads();
+    reduce1d_sum_uint32_t(smem_uint32_tSumReduction_one_step, blockDim.x, i_local);
+    if(i_local == 0){
+        output_vector[blockIdx.x] = smem_uint32_tSumReduction_one_step[0];
+    }
+}
+
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  candidate neighbours  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
+__global__ void update_HD_sim_and_local_state_euclidean(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, float* Xhd, uint32_t* knn_HD_write, float* sqdists_HD_write, float* invRadii_HD, float* Pasm, float* Pasym_sums, float* Psym, uint32_t* Psym_knn){
+    return;
+}
+
+__global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t* knn_LD_read, uint32_t seed_shared){
+    extern __shared__ float smem_HD_candidates_eucl[];
+    return;
+    /*
+
+
+
+RETIRER TOUT CE CODE ET PRENDRE CELUI DES LD KNN: 
+il marche en LD c est sur et vérifié. Ca sera plus rapie que de debugger un truc qui ne marche pas
+
+
+
+RETIRER TOUT CE CODE ET PRENDRE CELUI DES LD KNN: 
+il marche en LD c est sur et vérifié. Ca sera plus rapie que de debugger un truc qui ne marche pas
+
+
+
+RETIRER TOUT CE CODE ET PRENDRE CELUI DES LD KNN: 
+il marche en LD c est sur et vérifié. Ca sera plus rapie que de debugger un truc qui ne marche pas
+
+
+
+RETIRER TOUT CE CODE ET PRENDRE CELUI DES LD KNN: 
+il marche en LD c est sur et vérifié. Ca sera plus rapie que de debugger un truc qui ne marche pas
+
+
+
+
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t cand_number    = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    if(obs_i_global >= N){
+        return;}
+                
+    // ------- init  shared memory -------
+    uint32_t offset_smem = 0u;
+    float*    X_i = &smem_HD_candidates_eucl[offset_smem + obs_i_in_block * Mhd];
+    offset_smem += n_obs_in_block * Mhd;
+    float*    cand_dists = &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
+    offset_smem += n_obs_in_block * N_CAND_HD;
+    uint32_t* cand_idxs = (uint32_t*) &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
+    offset_smem += n_obs_in_block * N_CAND_HD;
+    float*    farthest_dist = &smem_HD_candidates_eucl[offset_smem + obs_i_in_block];
+    offset_smem += n_obs_in_block;
+    uint32_t* smem_perms_retained = (uint32_t*) &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
+    offset_smem += n_obs_in_block * N_CAND_HD;
+    uint32_t* smem_reductionslocal = (uint32_t*) &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
+    offset_smem += n_obs_in_block * N_CAND_HD;
+    uint32_t* smem_collisions = (uint32_t*) &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
+    if(N_CAND_HD >= Mhd){
+        if(cand_number < Mhd){
+            float Xi_m = Xhd[obs_i_global * Mhd + cand_number];
+            X_i[cand_number] = Xi_m;
+        }
+    }
+    else{
+        const uint32_t N_steps = (Mhd + N_CAND_HD - 1u) / N_CAND_HD;
+        const uint32_t step_size = N_CAND_HD;
+        for(uint32_t step = 0u; step < N_steps; step++){
+            uint32_t index = step * step_size + cand_number;
+            if(index < Mhd){
+                float Xi_m = Xhd[obs_i_global * Mhd + index];
+                X_i[index] = Xi_m;
+            }
+            __syncthreads();
+        }
+    }
+    if(cand_number == 0u){
+        farthest_dist[0] = farthest_dist_HD_write[obs_i_global];
+    }
+    __syncthreads();  // sync for smem
+
+    // ------- init  a local seed -------
+    uint32_t seed_local = seed_shared + (obs_i_global*N_CAND_HD)*2387u + cand_number*2u;
+    random_uint32_t_xorshift32(&seed_local);
+    // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in HD -------
+    const uint32_t lookat_rand_until = 4u;
+    const uint32_t lookat_LDneighs_until = lookat_rand_until + ((N_CAND_HD - lookat_rand_until) / 2u);
+    const uint32_t lookat_HDneighs_until = N_CAND_HD;
+    uint32_t cand = 0u;
+    if(cand_number < lookat_rand_until){ // random index
+        cand = random_uint32_t_xorshift32(&seed_local) % N;
+    }
+    else if (cand_number < lookat_LDneighs_until){
+        uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KHD;
+        uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KHD;
+        uint32_t neighbour = knn_HD_read[obs_i_global*KHD + r1];
+        cand = knn_HD_read[neighbour*KHD + r2];
+    }
+    else{
+        uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KLD;
+        uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KLD;
+        uint32_t neighbour = knn_LD_read[obs_i_global*KLD + r1];
+        cand = knn_LD_read[neighbour*KLD + r2];
+    }
+    while(cand == obs_i_global){
+        cand = random_uint32_t_xorshift32(&seed_local) % N;
+    }
+    cand_idxs[cand_number] = cand;
+    __syncthreads();
+
+    // ------- compute the distance to the candidate -------
+    float* X_cand = &Xhd[cand * Mhd];
+    float cand_distance = squared_euclidean_distance(X_i, X_cand, Mhd);
+    // float cand_distance = squared_euclidean_distance_thresholed(X_i, X_cand, Mhd, farthest_dist[0]);
+    cand_dists[cand_number] = cand_distance;
+    __syncthreads();
+
+    // -------  approximate sorting, ascending this time  (opposite to neighbour sort)  --------
+    reduce1d_argmin_float(cand_dists, cand_idxs, N_CAND_HD, cand_number);
+    bool cand_divisible_by_2 = (cand_number % 2) == 0;
+    bool cand_divisible_by_3 = (cand_number % 3) == 0;
+    magicSwaps_global_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, cand_divisible_by_3);
+    seed_shared = (seed_shared / 2u) + 1998763u;
+    magicSwaps_global_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, cand_divisible_by_3);
+    // -------  update from permutations after reduction  -------
+    cand = cand_idxs[cand_number];
+    cand_distance = cand_dists[cand_number];
+
+    // cand_idxs contiennent des index et pas les indexes ds le dataset . pareil en LD!!
+
+    // ------- find "cand_R": the number of cand that are retained (there are the N_leftmost in cand_idxs) -------
+    __syncthreads();
+    uint32_t here_value = 0u;
+    float farthest = farthest_dist[0];
+    float dist_here = cand_distance;
+    if(dist_here < farthest){
+        float to_beat_1to1 = sqdists_HD_write[obs_i_global*KHD + cand_number]; 
+        if(dist_here < to_beat_1to1){
+            here_value = cand_number + 1u;
+        }
+    }
+    smem_perms_retained[cand_number] = here_value;  
+    __syncthreads();
+    if(cand_number > 0u){
+        if(cand_number > 1u && smem_perms_retained[cand_number - 2u] == 0u){
+            here_value = 0u;} 
+        if(smem_perms_retained[cand_number - 1u] == 0u){
+            here_value = 0u;}
+    }
+    smem_perms_retained[cand_number] = here_value;
+    __syncthreads();
+    if((cand_number > 0u && smem_perms_retained[cand_number - 1u] == 0u) || (cand_number > 1u && smem_perms_retained[cand_number - 2u] == 0u)){
+        here_value = 0u;
+    }
+    smem_perms_retained[cand_number] = here_value;
+    __syncthreads();
+    reduce1d_max_uint32(smem_perms_retained, N_CAND_HD, cand_number);
+    uint32_t cand_R = smem_perms_retained[0];
+    __syncthreads();
+
+    smem_reductionslocal[cand_number] = 0u;
+    smem_collisions[cand_number] = 0u;
+    cand          = cand_idxs[cand_number];
+    cand_distance = cand_dists[cand_number];
+
+    // pre load the neighbours at the the first 8 steps
+    const uint32_t n_neighs_div_N_cand = (KHD + N_CAND_HD - 1) / N_CAND_HD;
+    uint32_t first_8_steps_neighs[8];
+    uint32_t min8_n_neighs_div_N_cand = min(8u, n_neighs_div_N_cand);
+    for(uint32_t step = 0u; step < min8_n_neighs_div_N_cand; step++){
+        uint32_t idx_k = step*N_CAND_HD + cand_number;
+        if(idx_k >= KHD){
+            idx_k = cand_number;}
+        uint32_t knn_j = knn_HD_read[obs_i_global*KHD + idx_k]; // !!  slow  !!
+        first_8_steps_neighs[step] = knn_j;
+    }
+
+    
+    for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
+        __syncthreads();
+        uint32_t working_j = cand_idxs[working_cand_nb];
+        uint32_t collision_cand = 0u;
+        if(cand_number < cand_R){
+            if(working_cand_nb != cand_number){
+                if(cand == working_j){
+                    collision_cand = 1u;
+                }
+            }
+        }
+        __syncthreads();
+
+        
+
+        
+
+        // ---------- testing with one thread as ground truth ----------
+        if(cand_number == 0u){
+            uint32_t collision_cand_GT = 0u;
+            uint32_t collision_value = 0u;
+            for(uint32_t other_cand_number = 0u; other_cand_number < cand_R; other_cand_number++){
+                if(other_cand_number != working_cand_nb){
+                    uint32_t other_cand = cand_idxs[other_cand_number];
+                    if(working_j == other_cand){
+                        collision_cand_GT = 1u;
+                        collision_value   = other_cand_number;
+                    }
+                }
+            }
+            if( collision_cand_GT != collision_cand && obs_i_global == 0u){
+                printf("ERROR :    collision_cand_GT = %u, collision_cand = %u\\n", collision_cand_GT, collision_cand);
+                for(uint32_t other_cand_number = 0u; other_cand_number < cand_R; other_cand_number++){
+                    uint32_t other_cand = cand_idxs[other_cand_number];
+                    printf("other_cand = %u\\n", other_cand);
+                }
+                printf("collision_value = %u\\n", collision_value);
+            }
+        }
+        __syncthreads();
+        // ---------- testing with one thread as ground truth ----------
+
+        
+
+
+
+
+        uint32_t collision_knn  = 0u;
+        for(uint32_t step = 0u; step < n_neighs_div_N_cand; step++){
+            uint32_t knn_j = 0u;
+            if(step < min8_n_neighs_div_N_cand){
+                knn_j = first_8_steps_neighs[step];
+            }
+            else{
+                uint32_t idx_k = step*N_CAND_HD + cand_number;
+                if(idx_k >= KHD){
+                    idx_k = cand_number;}
+                knn_j = knn_HD_read[obs_i_global*KHD + idx_k]; // !!  slow  !!
+            }
+            if(knn_j == working_j){
+                collision_knn = 1u;
+            }
+        }
+        smem_reductionslocal[cand_number] = collision_cand || collision_knn;
+        reduce1d_max_uint32(smem_reductionslocal, N_CAND_HD, cand_number);
+        if(cand_number == working_cand_nb){
+            smem_collisions[working_cand_nb] = smem_reductionslocal[0];
+        }
+    }
+
+    // -------  insert valid candidates as neighbours -------
+    __syncthreads();
+    if(cand_number >= cand_R){
+        return;
+    }
+    if(smem_collisions[cand_number] == 0u){
+        knn_HD_write[obs_i_global*KHD + cand_number]     = cand;
+        sqdists_HD_write[obs_i_global*KHD + cand_number] = cand_distance;
+    }
+    */
+    return;
+}
+
 // block x : candidate number   block y : observation number
-__global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_readWrite, float* sqdists_LD_readWrite, float* farthest_dist_LD_write, uint32_t* knn_HD_read, uint32_t seed_shared){
+__global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read, uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write, uint32_t* knn_HD_read, uint32_t seed_shared){
     extern __shared__ float smem_LD_candidates[];
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t cand_number    = threadIdx.x; 
-    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * blockDim.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
     if(obs_i_global >= N){
         return;}
     const uint32_t lookat_rand_until     = 6u;
@@ -583,17 +1066,17 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     // ------- init  shared memory -------
     uint32_t offset_smem = 0u;
     float*    X_i             = &smem_LD_candidates[offset_smem + obs_i_in_block * Mld];
-    offset_smem += n_obs_in_block * Mld;
+    offset_smem              += n_obs_in_block * Mld;
     float*    cand_dists      = &smem_LD_candidates[offset_smem + obs_i_in_block*N_CAND_LD];
-    offset_smem += n_obs_in_block * N_CAND_LD;
+    offset_smem              += n_obs_in_block * N_CAND_LD;
     uint32_t* cand_idxs       = (uint32_t*) &smem_LD_candidates[offset_smem + obs_i_in_block*N_CAND_LD];
-    offset_smem += n_obs_in_block * N_CAND_LD;
+    offset_smem              += n_obs_in_block * N_CAND_LD;
     float*    farthest_dist   = &smem_LD_candidates[offset_smem + obs_i_in_block];
-    offset_smem += n_obs_in_block;
+    offset_smem              += n_obs_in_block;
     uint32_t* smem_perms_retained = (uint32_t*) &smem_LD_candidates[offset_smem + obs_i_in_block*N_CAND_LD];
-    offset_smem += n_obs_in_block * N_CAND_LD;
+    offset_smem              += n_obs_in_block * N_CAND_LD;
     uint32_t* smem_reductionslocal = (uint32_t*) &smem_LD_candidates[offset_smem + obs_i_in_block*N_CAND_LD];
-    offset_smem += n_obs_in_block * N_CAND_LD;
+    offset_smem              += n_obs_in_block * N_CAND_LD;
     uint32_t* smem_collisions = (uint32_t*) &smem_LD_candidates[offset_smem + obs_i_in_block*N_CAND_LD];
     
     if(N_CAND_LD >= Mld){
@@ -603,44 +1086,52 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
         }
     }
     else{  
-        if(cand_number == 0u){
-            float* Xi_globalmem = &Xld_read[obs_i_global * Mld];
-            for(uint32_t m = 0; m < Mld; m++){
-                float Xi_m = Xi_globalmem[m];
-                X_i[m]     = Xi_m;
+        const uint32_t N_steps   = (Mld + N_CAND_LD - 1u) / N_CAND_LD;
+        const uint32_t step_size = N_CAND_LD;
+        for(uint32_t step = 0u; step < N_steps; step++){
+            uint32_t index = step * step_size + cand_number;
+            if(index < Mld){
+                float Xi_m = Xld_read[obs_i_global * Mld + index];
+                X_i[index] = Xi_m;
             }
+            __syncthreads();
         }
     }
+
+
     if(cand_number == 0u){
         farthest_dist[0] = farthest_dist_LD_write[obs_i_global];
+        if(obs_i_global == 0u){
+            printf("farthest_dist[0] = %f   i: %u\\n", farthest_dist[0], obs_i_global);
+        }
     }
     __syncthreads();  // sync for smem
     // ------- init  a local seed -------
     uint32_t seed_local = seed_shared + (obs_i_global*N_CAND_LD)*2387u + cand_number*2u;
     random_uint32_t_xorshift32(&seed_local);
     // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in LD or HD -------
-    uint32_t cand_i = 0u;
-    if(cand_number < 6u){ // random index
-        cand_i = random_uint32_t_xorshift32(&seed_local) % N;
+    uint32_t cand = 0u;
+    if(cand_number < lookat_rand_until){ // random index
+        cand = random_uint32_t_xorshift32(&seed_local) % N;
     }
     else if (cand_number < lookat_LDneighs_until){
         uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KLD;
         uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KLD;
-        uint32_t neighbour = knn_LD_readWrite[obs_i_global*KLD + r1];
-        cand_i = knn_LD_readWrite[neighbour*KLD + r2];
+        uint32_t neighbour = knn_LD_read[obs_i_global*KLD + r1];
+        cand = knn_LD_read[neighbour*KLD + r2];
     } 
     else{
         uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KHD;
         uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KHD;
         uint32_t neighbour = knn_HD_read[obs_i_global*KHD + r1];
-        cand_i = knn_HD_read[neighbour*KHD + r2];
+        cand = knn_HD_read[neighbour*KHD + r2];
     }
-    while(cand_i == obs_i_global){
-        cand_i = random_uint32_t_xorshift32(&seed_local) % N;
+    while(cand == obs_i_global){
+        cand = random_uint32_t_xorshift32(&seed_local) % N;
     }
-    cand_idxs[cand_number] = cand_i;
+    cand_idxs[cand_number] = cand;
     // ------- compute the distance to the candidate -------
-    float* X_cand = &Xld_read[cand_i * Mld];
+    float* X_cand = &Xld_read[cand * Mld];
     float cand_distance = squared_euclidean_distance(X_i, X_cand, Mld);
     cand_dists[cand_number] = cand_distance;
     __syncthreads();
@@ -654,7 +1145,7 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     magicSwaps_global_ascending(cand_dists, cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, seed_shared);
     magicSwaps_local_ascending(cand_dists, cand_idxs, cand_number, N_CAND_LD, cand_divisible_by_2, cand_divisible_by_3);
     // -------  update from permutations after reduction  -------
-    cand_i        = cand_idxs[cand_number];  
+    cand          = cand_idxs[cand_number];  
     cand_distance = cand_dists[cand_number];
     // ------- find "cand_R": the number of cand that are retained (there are the N_leftmost in cand_idxs) -------
     __syncthreads();
@@ -663,7 +1154,7 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     float farthest  = farthest_dist[0];
     float dist_here = cand_distance;
     if(dist_here < farthest){
-        float to_beat_1to1 = sqdists_LD_readWrite[obs_i_global*KLD + cand_number];
+        float to_beat_1to1 = sqdists_LD_write[obs_i_global*KLD + cand_number];
         if(dist_here < to_beat_1to1){
             here_value = cand_number + 1u;
         }
@@ -690,92 +1181,56 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
 
     smem_reductionslocal[cand_number] = 0u;
     smem_collisions[cand_number] = 0u;
-    cand_i        = cand_idxs[cand_number];  
+    cand          = cand_idxs[cand_number];  
     cand_distance = cand_dists[cand_number];
 
-
-
-    
-
-    __syncthreads();
+    // pre load the neighbours at the the first 8 steps
     const uint32_t n_neighs_div_N_cand = (KLD + N_CAND_LD - 1) / N_CAND_LD;
-    for(uint32_t step = 0u; step < n_neighs_div_N_cand; step++){
-        uint32_t idx_k = step*n_neighs_div_N_cand + cand_number;
+    uint32_t first_8_steps_neighs[8];
+    uint32_t min8_n_neighs_div_N_cand = min(8u, n_neighs_div_N_cand);
+    for(uint32_t step = 0u; step < min8_n_neighs_div_N_cand; step++){
+        uint32_t idx_k = step*N_CAND_LD + cand_number;
         if(idx_k >= KLD){
             idx_k = cand_number;}
-        uint32_t knn_j = knn_LD_readWrite[obs_i_global*KLD + idx_k]; // !!  slow  !!
-        for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
-            uint32_t working_j = cand_idxs[working_cand_nb];
-            uint32_t collision = (knn_j == working_j);
-            uint32_t new_collision = collision || smem_reductionslocal[cand_number];
-            smem_reductionslocal[cand_number] = new_collision;
-        }
-    }
-    __syncthreads();
-    for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
-        uint32_t collision_here = 0u;
-        if(cand_number < cand_R){
-            if(working_cand_nb != cand_number){
-                uint32_t working_j = cand_idxs[working_cand_nb];
-                if(cand_i == working_j){
-                    collision_here = 1u;
-                }
-            }
-        }
-        uint32_t new_collision = collision_here || smem_reductionslocal[cand_number];
-        smem_reductionslocal[cand_number] = new_collision;
-    }
-    __syncthreads();
-    for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
-        reduce1d_max_uint32(smem_reductionslocal, N_CAND_LD, cand_number);
-        if(cand_number == 0u){
-            smem_collisions[working_cand_nb] = smem_collisions[working_cand_nb] || (smem_reductionslocal[0] > 0u);
-        }
+        uint32_t knn_j = knn_LD_write[obs_i_global*KLD + idx_k]; // !!  slow  !!
+        first_8_steps_neighs[step] = knn_j;
     }
 
-    /*
     for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
         __syncthreads();
-        uint32_t collision_here = 0u;
+        uint32_t working_j = cand_idxs[working_cand_nb];
+        // collision within candidates
+        uint32_t collision_cand = 0u;
         if(cand_number < cand_R){
             if(working_cand_nb != cand_number){
-                uint32_t working_j = cand_idxs[working_cand_nb];
-                if(cand_i == working_j){
-                    collision_here = 1u;
+                if(cand == working_j){
+                    collision_cand = 1u;
                 }
             }
         }
-        smem_reductionslocal[cand_number] = collision_here;
-        reduce1d_max_uint32(smem_reductionslocal, cand_R, cand_number);
+        // collision with the neighbours in LD
+        uint32_t collision_knn  = 0u;
+        for(uint32_t step = 0u; step < n_neighs_div_N_cand; step++){
+            uint32_t knn_j = 0u;
+            if(step < min8_n_neighs_div_N_cand){
+                knn_j = first_8_steps_neighs[step];
+            }
+            else{
+                uint32_t idx_k = step*N_CAND_LD + cand_number;
+                if(idx_k >= KLD){
+                    idx_k = cand_number;}
+                knn_j = knn_LD_write[obs_i_global*KLD + idx_k]; // !!  slow  !!
+            }
+            if(knn_j == working_j){
+                collision_knn = 1u;
+            }
+        }
+        smem_reductionslocal[cand_number] = collision_cand || collision_knn;
+        reduce1d_max_uint32(smem_reductionslocal, N_CAND_LD, cand_number);
         if(cand_number == working_cand_nb){
             smem_collisions[working_cand_nb] = smem_reductionslocal[0];
         }
     }
-
-    // ------- check for collisions with the neighbours in LD -------
-    const uint32_t n_neighs_div_N_cand = (KLD + N_CAND_LD - 1) / N_CAND_LD;
-    for(uint32_t step = 0u; step < n_neighs_div_N_cand; step++){
-        uint32_t idx_k = step*n_neighs_div_N_cand + cand_number;
-        if(idx_k >= KLD){
-            idx_k = cand_number;}
-        uint32_t knn_j = knn_LD_readWrite[obs_i_global*KLD + idx_k]; // !!  slow  !!
-        for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
-            uint32_t working_j = cand_idxs[working_cand_nb];
-            uint32_t collision = (knn_j == working_j);
-            uint32_t new_collision = collision || smem_reductionslocal[cand_number];
-            smem_reductionslocal[cand_number] = new_collision;
-        }
-    }
-    __syncthreads();
-    for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
-        reduce1d_max_uint32(smem_reductionslocal, N_CAND_LD, cand_number);
-        if(cand_number == 0u){
-            smem_collisions[working_cand_nb] = smem_collisions[working_cand_nb] || (smem_reductionslocal[0] > 0u);
-        }
-    }
-    */
-
-
     
     // -------  insert valid candidates as neighbours -------
     __syncthreads();
@@ -783,19 +1238,9 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
         return;
     }
     if(smem_collisions[cand_number] == 0u){
-        knn_LD_readWrite[obs_i_global*KLD + cand_number]     = cand_i;
-        sqdists_LD_readWrite[obs_i_global*KLD + cand_number] = cand_distance;
+        knn_LD_write[obs_i_global*KLD + cand_number]     = cand;
+        sqdists_LD_write[obs_i_global*KLD + cand_number] = cand_distance;
     }
-
-    if(obs_i_global == 0u && cand_number == 0u){
-        for(uint32_t kk = 0u; kk < cand_R; kk++){
-            printf(" collision: %u \\n", smem_collisions[kk]);
-        }
-        printf("\\n");
-        printf("\\n");
-    }
-    
-    
     return;
 }
 
@@ -1151,11 +1596,17 @@ __global__ void perform_minMax_reduction(float *vec2d_temp_mins, float* vec2d_te
     float* shared_mins = &shared_memory_all[0];
     float* shared_maxs = (float*)&shared_memory_all[blockDim.x];
 
+    
+    printf(" BAD FUNCTION, DELETE\\n");
+
+
     // compute indices, remove out of bounds threads
     uint32_t obs_i    = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t var_i    = blockIdx.y;
     uint32_t flat_i   = var_i * N + obs_i;
     if (obs_i >= N || var_i >= M) { return; }
+
+    // non: swap for warreduce
 
     // 1. copy the data to shared memory for faster access
     shared_mins[threadIdx.x] = vec2d_temp_mins[flat_i];
@@ -1163,7 +1614,7 @@ __global__ void perform_minMax_reduction(float *vec2d_temp_mins, float* vec2d_te
     __syncthreads();
 
     // 2. launch a block-wide reduction for the current variable
-    reduce1d_minMax_float(shared_mins, shared_maxs, blockDim.x, threadIdx.x);
+    reduce1d_minMax_float_noWarp(shared_mins, shared_maxs, blockDim.x, threadIdx.x);
 
     // 3. write the result to global memory
     if(threadIdx.x == 0){
@@ -1175,38 +1626,47 @@ __global__ void perform_minMax_reduction(float *vec2d_temp_mins, float* vec2d_te
 }
 
 __global__ void kernel_X_to_transpose(float* Xread, float* Xwrite, uint32_t N, uint32_t M){
-    uint32_t obs_i    = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t var_i    = blockIdx.y;
-    if (obs_i >= N || var_i >= M) { return; }
-    uint32_t flat_i   = obs_i * M + var_i;
-    float value = Xread[flat_i];
-    uint32_t out_i = var_i * N + obs_i;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t m              = threadIdx.x; 
+    uint32_t obs_i          = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    if (obs_i >= N || m >= M) { return; }
+    uint32_t inp_i = obs_i * M + m;
+    uint32_t out_i = m * N + obs_i;
+    float value   = Xread[inp_i];
     Xwrite[out_i] = value;
 }
 
-__global__ void kernel_scale_X(float* X, float* mins, float* maxs, uint32_t N, uint32_t M){
-    extern __shared__ float shared_memory_scaling[];
-    uint32_t obs_i    = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t var_i    = blockIdx.y;
-    if (obs_i >= N || var_i >= M) { return; }
+__global__ void kernel_update_EMA_LD(float* mins_EMA, float* maxs_EMA, float* mins, float* maxs , uint32_t M){
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    uint32_t m              = threadIdx.x; 
+    if (obs_i_global > 0 || m >= M) { return; }
+    float momentum = 0.99f;
+    float min_val = mins[m];
+    float max_val = maxs[m];
+    float min_EMA = mins_EMA[m];
+    float max_EMA = maxs_EMA[m];
+    min_EMA = momentum * min_EMA + (1.0f - momentum) * min_val;
+    max_EMA = momentum * max_EMA + (1.0f - momentum) * max_val;
+    mins_EMA[m] = min_EMA;
+    maxs_EMA[m] = max_EMA;
+    return;
+}
 
-    // copy the scaling parameters to shared memory
-    if(threadIdx.x == 0){
-        float min_val = mins[var_i];
-        float max_val = maxs[var_i];
-        float range   = max_val - min_val;
-        shared_memory_scaling[0] = min_val;
-        shared_memory_scaling[1] = range + 0.0000001f;
-    }
-    __syncthreads();
+__global__ void kernel_scale_X(float* X_in, float* X_out, float min_val, float max_val, uint32_t N, uint32_t M){
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    uint32_t m              = threadIdx.x; 
+    if (obs_i_global >= N || m >= M) { return; }
 
     // scale the data: (-0.75 to 0.75)  and shift the data (y min = -1.0)
-    float value   = X[obs_i*M + var_i];
-    float min_val = shared_memory_scaling[0];
-    float range   = shared_memory_scaling[1];
-    float scaled  = (value - min_val) / range;
-    scaled = 1.5f * scaled - 0.75f; // make it between -0.75 and 0.75
-    X[obs_i*M + var_i] = scaled;
+    float value   = X_in[obs_i_global*M + m];
+    float scaled  = (value - min_val) / (max_val - min_val);
+    scaled = ((scaled - 0.5f) * 2.0f) / 0.75f;
+    X_out[obs_i_global*M + m] = scaled * 0.45;
     return;
 }
 
