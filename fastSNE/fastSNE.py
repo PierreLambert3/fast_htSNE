@@ -759,12 +759,13 @@ class fastSNE:
             # print()
         
 
-        if (self.periodic_1000 % 12) == 0 or self.periodic_1000 < 3:
-            stream_neigh_LD.synchronize()
-            stream_grads.synchronize()
-            verify_neighdists(read_Xld, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
+        if (self.periodic_1000 % 61) == 0 or self.periodic_1000 < 3:
+            # stream_neigh_LD.synchronize()
+            # stream_grads.synchronize()
+            # verify_neighdists(read_Xld, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
             stream_neigh_HD.synchronize()
             stream_grads.synchronize()
+            print()
             verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream_neigh_HD)
 
 
@@ -883,7 +884,7 @@ class fastSNE:
         #  N x __N_CAND_HD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_HD__
         block_x     = __N_CAND_HD__
-        smem_n_float32_per_thread = 4 + (2) # +2 for testing, remove it
+        smem_n_float32_per_thread = 4 
         smem_n_float_per_y = Mhd + 1
         smem_n_float_const = 0
         self.Kshapes2d_NxNcandHD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
@@ -1077,7 +1078,7 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
     last_dists = np.zeros((K,), dtype=np.float32)
     n_evals = 0.0
 
-    N_commparisons = 10
+    N_commparisons = 3
     for comp in range(N_commparisons):
         i = np.random.randint(0, N)
         scaling = 1.0

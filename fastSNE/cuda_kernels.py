@@ -972,9 +972,10 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     reduce1d_max_uint32(smem_perms_retained, N_CAND_HD, cand_number);
     uint32_t cand_R = smem_perms_retained[0];
     __syncthreads();
+    
+    smem_collisions[cand_number]            = 0u;
+    __syncthreads();
 
-    /*
-    ------ ADD THIS BACK LATER !!! ------
     // filter candidates where cand_dist > neighdist_at_same_idx (the cand_R upper bound is not a strict guarantee for the candidate to be closer than its associated neighbour)
     __syncthreads();
     if(cand_number < cand_R){
@@ -986,94 +987,90 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
         }
     }
     __syncthreads();
-    ------ ADD THIS BACK LATER !!! ------
-    */
 
-    
-    __syncthreads();
-    smem_collisions_candVcand[cand_number]  = 0u;
-    smem_collisions_candVneigh[cand_number] = 0u;
-    smem_collisions[cand_number]            = 0u;
-    __syncthreads();
 
 
     // -------------- PARALLEL --------------
+    // 1. pre-load in parallel parts of KHD neighbours for each observation
+    // will have a loop with astrided iteration on the neighbours, with step = N_CAND_HD. 
+    // determine the loop params
+    const uint32_t stride  = N_CAND_HD;
+    uint32_t n_steps = (KHD + stride - 1u) / stride;
+    // pre load the first strides in parallel
+    uint32_t strided_8knn_HD[8u];
+    if(n_steps < 8u){
+        for(uint32_t step = 0u; step < n_steps; step++){
+            uint32_t idx = step * stride + cand_number;
+            if(idx < KHD){
+                strided_8knn_HD[step] = knn_HD_write[obs_i_global*KHD + idx];
+            }
+        }
+    }
+    else{
+        for(uint32_t step = 0u; step < 8u; step++){
+            uint32_t idx = step * stride + cand_number;
+            if(idx < KHD){
+                strided_8knn_HD[step] = knn_HD_write[obs_i_global*KHD + idx];
+            }
+        }
+    }
+    __syncthreads();
+    // 2. candidates and neigbours collision detection
     uint32_t self_cursor = cand_number;
     uint32_t self_j      = cand_idxs[cand_number];
     bool  self_is_winner = self_cursor < cand_R;
     for(uint32_t current_cursor = 0u; current_cursor < cand_R; current_cursor++){
-        smem_reductionslocal[self_cursor] = 0u;
         uint32_t current_j = cand_idxs[current_cursor];
+        smem_reductionslocal[self_cursor] = 0u;
+        // 2.1. collision with other candidates
         if(self_is_winner && self_cursor != current_cursor){
             if(self_j == current_j){
                 smem_reductionslocal[self_cursor] = 1u;
             }
         }
-        reduce1d_max_uint32_t(smem_reductionslocal, cand_R, self_cursor);
-        // reduce1d_max_uint32_t(smem_reductionslocal, KHD, self_cursor);
         __syncthreads();
-
+        // 2.2. collision with  neighbours
+        __syncthreads();
+        bool hit = false;
+        for(uint32_t step = 0u; step < n_steps; step++){
+            uint32_t idx = step * stride + cand_number;
+            uint32_t step_neigh_j = 0u;
+            if(step < 8u || idx >= KHD){
+                step_neigh_j = strided_8knn_HD[step];
+            }
+            else{
+                step_neigh_j = knn_HD_write[obs_i_global*KHD + idx];
+            }
+            if(step_neigh_j == current_j){
+                hit = true;
+            }
+        }
+        if(hit){
+            smem_reductionslocal[self_cursor] = 1u;
+        }
+        reduce1d_max_uint32_t(smem_reductionslocal, N_CAND_HD, self_cursor);
+        __syncthreads();
         if(self_cursor == current_cursor){
             bool has_collision = smem_reductionslocal[0] > 0u;
             if(has_collision){
-                smem_collisions_candVcand[self_cursor] = 1u;
+                smem_collisions[self_cursor] = 1u;
             }
         }
-        // check that unique within neighbours
-        // need to use steps because N cand < N neigh
+        __syncthreads();
     }
     __syncthreads();
-
-    if(cand_number == 0u){
-        for(uint32_t current_cursor = 0u; current_cursor < cand_R; current_cursor++){
-            uint32_t cand_idx = cand_idxs[current_cursor];
-            /*
-            // -------------- SEQUENTIAL --------------
-            // check that unique within candidates
-            bool is_unique_SEQUENTIAL = true;
-            for(uint32_t other_cand = 0u; other_cand < N_CAND_HD; other_cand++){
-                if(current_cursor != other_cand){
-                    if(cand_idx == cand_idxs[other_cand]){
-                        is_unique_SEQUENTIAL = false;
-                        break;
-                    }
-                }
-            }
-            smem_collisions_candVcand[current_cursor] = is_unique_SEQUENTIAL ? 0u : 1u;
-            */
-            
-            // check that unique within neighbours
-            is_unique_SEQUENTIAL = true;
-            for(uint32_t k = 0u; k < KHD; k++){
-                if(cand_idx == knn_HD_write[obs_i_global*KHD + k]){
-                    is_unique_SEQUENTIAL = false;
-                    break;
-                }
-            }
-            smem_collisions_candVneigh[current_cursor] = is_unique_SEQUENTIAL ? 0u : 1u;
-            
-            if(smem_collisions_candVneigh[current_cursor] || smem_collisions_candVcand[current_cursor]){
-                smem_collisions[current_cursor] = 1u;
-            }
-        }
-    }
-
     
 
 
-    __syncthreads();
-    if(cand_number < cand_R){
-        bool can_add = smem_collisions[cand_number] == 0u;
-        if(obs_i_global == 0u && cand_number == 0u){
-            printf("\\n cand_R: %u    can_add : %u", cand_R, can_add);
-        }
-        if(can_add){
-            knn_HD_write[obs_i_global*KHD + cand_number]     = cand_idxs[cand_number];
-            sqdists_HD_write[obs_i_global*KHD + cand_number] = cand_dists[cand_number];
-            if(obs_i_global == 0u ){
-                printf(" - ");
-            }
-        }
+    if( cand_number >= cand_R){
+        return;
+    }
+    if(!(smem_collisions[cand_number]>0u)){
+        knn_HD_write[obs_i_global*KHD + cand_number]     = cand_idxs[cand_number];
+        sqdists_HD_write[obs_i_global*KHD + cand_number] = cand_dists[cand_number];
+        // if(obs_i_global == 0u ){
+        //     printf(" - ");
+        // }
     }
 
     // TODO : UPDATE FARTHEST DISTANCE (else bad neighbour candidates will be retained)
