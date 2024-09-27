@@ -334,8 +334,8 @@ class Kernel_shapes_2dBlocks:
             next_threads_per_block = next_block_y * block_x
             next_smem_n_bytes_per_block = (next_threads_per_block * smem_n_float32_per_thread + constant_additional_smem_n_float32 + block_y*smem_n_float32_per_block_y) * np.dtype(np.float32).itemsize
             next_n_blocks = (N_threads_total + next_threads_per_block - 1) // next_threads_per_block
-            next_tpb_ok = next_threads_per_block <= max_threads_per_block
-            next_smem_ok = next_smem_n_bytes_per_block <= max_shared_memory_per_block
+            next_tpb_ok     = next_threads_per_block <= max_threads_per_block
+            next_smem_ok    = next_smem_n_bytes_per_block <= max_shared_memory_per_block
             next_block_y_ok = next_block_y <= max_block_y
             if next_tpb_ok and next_smem_ok and next_block_y_ok:
                 block_y = next_block_y
@@ -351,6 +351,13 @@ class Kernel_shapes_2dBlocks:
         self.smem_n_bytes_per_block = smem_n_bytes_per_block
         self.grid_x_size = n_blocks
         self.grid_y_size = 1
+    
+    def print(self):
+        print("block_x: ", self.block_x, " block_y: ", self.block_y)
+        print("threads_per_block: ", self.threads_per_block)
+        print("smem_n_bytes_per_block: ", self.smem_n_bytes_per_block)
+        print("grid_x_size: ", self.grid_x_size, " grid_y_size: ", self.grid_y_size)
+
 
 
 class fastSNE:    
@@ -721,14 +728,14 @@ class fastSNE:
                       has_new_HD_neighs_write, invRadii_HD, Pasm, Pasym_sums, Psym, Psym_knn):
         self.periodic_1000 = (self.periodic_1000 + 1) % 1000
         # 0/ - gradient computations & update positions
-        # alpha = 0.05
-        # if warmup:
-        #     if (self.periodic_1000 % 45) == 0:
-        #         self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
-        #     elif (self.periodic_1000 % 1) == 0:
-        #         self.linear_projection_now = (1.0 - alpha) * self.linear_projection_now + alpha * self.linear_projection_target
-        #         self.cpu_Xld = np.dot(self.Xhd, self.linear_projection_now).astype(np.float32)
-        #         write_Xld.set_async(self.cpu_Xld, stream=stream_grads)
+        alpha = 0.01
+        if warmup:
+            if (self.periodic_1000 % 85) == 0:
+                self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
+            elif (self.periodic_1000 % 1) == 0:
+                self.linear_projection_now = (1.0 - alpha) * self.linear_projection_now + alpha * self.linear_projection_target
+                self.cpu_Xld = np.dot(self.Xhd, self.linear_projection_now).astype(np.float32)
+                write_Xld.set_async(self.cpu_Xld, stream=stream_grads)
                 
         # else:
         #     print("launch gradients kernel")
@@ -742,8 +749,8 @@ class fastSNE:
         #     - find candidate neighbours for HD space, compute their distances on insertion recompute farthest distances
         # OR  - points with new HD neighbours: recompute HD similarities & local HD state (invRadii, Pasym, Pasym_sums)
         self.high_dim_refineKNN(Xhd, knn_HD_read, knn_HD_write, knn_LD_read, sqdists_HD_write, farthest_dist_HD_write, stream_neigh_HD, has_new_HD_neighs_write)
-        if (self.periodic_1000  % 11) == 0:
-            self.high_dim_filtered_updateHDstates_and_Psym(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, has_new_HD_neighs_write, invRadii_HD, Pasm, Pasym_sums, Psym, Psym_knn, stream_neigh_HD)
+        # if (self.periodic_1000  % 11) == 0:
+        #     self.high_dim_filtered_updateHDstates_and_Psym(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, has_new_HD_neighs_write, invRadii_HD, Pasm, Pasym_sums, Psym, Psym_knn, stream_neigh_HD)
             
             # stream_neigh_HD.synchronize()
             # cpu_knn_HD_write = knn_HD_write.get()
@@ -752,12 +759,13 @@ class fastSNE:
             # print()
         
 
-        if (self.periodic_1000 % 1) == 0:
+        if (self.periodic_1000 % 12) == 0 or self.periodic_1000 < 3:
+            stream_neigh_LD.synchronize()
             stream_grads.synchronize()
             verify_neighdists(read_Xld, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, self.N, self.Mld, __Kld__, stream_neigh_LD)
-        # if (self.periodic_1000 % 1) == 0:
-        #     stream_grads.synchronize()
-        #     verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream_neigh_HD)
+            stream_neigh_HD.synchronize()
+            stream_grads.synchronize()
+            verify_neighdists(Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, self.N, self.Mhd, __Khd__, stream_neigh_HD)
 
 
         # 5/  - accumulated percent of changed is high engough: update HD similarities
@@ -823,10 +831,6 @@ class fastSNE:
     def high_dim_filtered_updateHDstates_and_Psym(self, Xhd, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, has_new_HD_neighs, invRadii_HD, Pasm, Pasym_sums, Psym, Psym_knn, stream_neigh_HD):
         # 1.  points with new HD neighbours: recompute HD similarities & local HD state (invRadii, Pasym, Pasym_sums)
         # 2.  save knn_HD_write as Psym_knn
-        block_shape  = self.Kshapes2d_NxKhd_threads.block_x, self.Kshapes2d_NxKhd_threads.block_y, 1
-        grid_shape   = self.Kshapes2d_NxKhd_threads.grid_x_size, self.Kshapes2d_NxKhd_threads.grid_y_size, 1
-        smem_n_bytes = self.Kshapes2d_NxKhd_threads.smem_n_bytes_per_block
-        self.update_HD_sim_and_local_state_euclidean_cu(np.uint32(self.N), np.uint32(self.Mhd), has_new_HD_neighs, Xhd, knn_HD_write, sqdists_HD_write, invRadii_HD, Pasm, Pasym_sums, Psym, Psym_knn, block=block_shape, grid=grid_shape, stream=stream_neigh_HD, shared=smem_n_bytes)
         # print("only doing euclidean distance for now here")
         # 2.  save knn_HD_write as Psym_knn
         return
@@ -837,140 +841,54 @@ class fastSNE:
         cuda_device = cuda.Device(device_number)
         cuda_device_attributes = cuda_device.get_attributes()
 
-        max_threads_per_block = cuda_device_attributes[cuda.device_attribute.MAX_THREADS_PER_BLOCK]
-        max_shared_memory_per_block = cuda_device_attributes[cuda.device_attribute.MAX_SHARED_MEMORY_PER_BLOCK]
-
-        # number_of_floats_per_block = max_shared_memory_per_block // 4
-        # number_of_floats_per_max_threads = number_of_floats_per_block // max_threads_per_block
-        # print("max_threads_per_block: ", max_threads_per_block)
-        # print("max_shared_memory_per_block: ", max_shared_memory_per_block)
-        # print("number_of_floats_per_block: ", number_of_floats_per_block)
-        # print("number_of_floats_per_max_threads: ", number_of_floats_per_max_threads)
-        # 1/0
-
-
         # ------------ 0. kernels used for getting the transpose of Xld  -------
         n_threads   = N * Mld
         multiple_of = 32 if n_threads > 32 else 1
         block_x     = Mld
-        smem_n_float32_per_thread = 4 
-        self.Kshapes_transpose = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, 2)
-
-
-
-
-        """ faire des 2Dkeneles pour Kshapes_minMax_lvl_2
-        faire des 2Dkeneles pour Kshapes_minMax_lvl_3 """
-
-
-
-
-
-
-
-
-        # ------------ 1. kernels used for rendering (ie: scaling points between 0.0f and 1.0f)  -------
-        #    finding the min and max values for each Mld dimension
-        #    2d grid: dim1~N, dim2~Mld^
-        #    find for only 1 dimension (as if Mld=1), and then add grid_y dimensions for the others
-        #     1.a  reduction level 2 
-        self.Kshapes_minMax_lvl_1 = None; self.Kshapes_minMax_lvl_2 = None; self.Kshapes_minMax_lvl_3 = None; self.Kshapes_minMax_lvl_4 = None;
-        self.do_reduction2 = False; self.do_reduction3 = False; self.do_reduction4 = False;
-        self.perdim_remaining_after_reduction1 = 1; self.perdim_remaining_after_reduction2 = 1; self.perdim_remaining_after_reduction3 = 1; self.perdim_remaining_after_reduction4 = 1;
-        n_threads   = N
-        multiple_of = 32 if n_threads > 32 else 1
-        smem_n_float32_per_thread = 2
-        self.Kshapes_minMax_lvl_1 = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes, 1)
-        self.Kshapes_minMax_lvl_1.grid_y_size = Mld
-        # the array containing the results of the reduction
-        self.perdim_remaining_after_reduction1 = self.Kshapes_minMax_lvl_1.grid_x_size
-        self.reduction1_result_mins = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction1, Mld), dtype=np.float32))
-        self.reduction1_result_maxs = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction1, Mld), dtype=np.float32))
-
-        self.mins_EMA = gpuarray.to_gpu(np.zeros((1, Mld), dtype=np.float32))
-        self.maxs_EMA = gpuarray.to_gpu(np.zeros((1, Mld), dtype=np.float32))
-        if self.perdim_remaining_after_reduction1 <= 1:
-            self.do_reduction2 = False
-            self.do_reduction3 = False
-            self.do_reduction4 = False
-        else:
-            #     1.b  reduction level 2 
-            self.do_reduction2 = True
-            n_threads = self.perdim_remaining_after_reduction1
-            multiple_of = 32 if n_threads > 32 else 1
-            self.Kshapes_minMax_lvl_2 = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes, 1)
-            self.Kshapes_minMax_lvl_2.grid_y_size = Mld
-            # the array containing the results of the reduction
-            self.perdim_remaining_after_reduction2 = self.Kshapes_minMax_lvl_2.grid_x_size
-            self.reduction2_result_mins = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction2, Mld), dtype=np.float32))
-            self.reduction2_result_maxs = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction2, Mld), dtype=np.float32))
-            if self.perdim_remaining_after_reduction2 <= 1:
-                self.do_reduction3 = False
-                self.do_reduction4 = False
-            else:
-                #     1.c  reduction level 3 
-                self.do_reduction3 = True
-                n_threads = self.perdim_remaining_after_reduction2
-                multiple_of = 32 if n_threads > 32 else 1
-                self.Kshapes_minMax_lvl_3 = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes, 1)
-                self.Kshapes_minMax_lvl_3.grid_y_size = Mld
-                # the array containing the results of the reduction
-                self.perdim_remaining_after_reduction3 = self.Kshapes_minMax_lvl_3.grid_x_size
-                self.reduction3_result_mins = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction3, Mld), dtype=np.float32))
-                self.reduction3_result_maxs = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction3, Mld), dtype=np.float32))
-                if self.perdim_remaining_after_reduction3 <= 1:
-                    self.do_reduction4 = False
-                else:
-                    #     1.d  reduction level 4 
-                    self.do_reduction4 = True
-                    n_threads = self.perdim_remaining_after_reduction3
-                    multiple_of = 32 if n_threads > 32 else 1
-                    self.Kshapes_minMax_lvl_4 = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes, 1)
-                    self.Kshapes_minMax_lvl_4.grid_y_size = Mld
-                    # the array containing the results of the reduction
-                    self.perdim_remaining_after_reduction4 = self.Kshapes_minMax_lvl_4.grid_x_size
-                    self.reduction4_result_mins = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction4, Mld), dtype=np.float32))
-                    self.reduction4_result_maxs = gpuarray.to_gpu(np.zeros((self.perdim_remaining_after_reduction4, Mld), dtype=np.float32))
-                    if self.perdim_remaining_after_reduction4 > 1:
-                        raise Exception("You have more that 1e12 points in your dataset. This hardcoded limit was written in the past where such large datasets were not common. ")
-
+        smem_n_float32_per_thread = 0 
+        smem_n_float_per_y = 0
+        smem_n_float_const = 0
+        self.Kshapes_transpose = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
+       
         # ------------ 2. kernels used for neighboru related things -------
         #   N threads
         n_threads = N
         multiple_of = 32 if n_threads > 32 else 1
         smem_n_float32_per_thread = 1
         self.Kshapes_N_threads = Kernel_shapes(n_threads, multiple_of, smem_n_float32_per_thread, cuda_device_attributes, Mhd)
-        self.Kshapes_N_threads.grid_y_size = 1
+        self.Kshapes_N_threads.grid_y_size = 1 
         #   N x Kld threads , 1d grid, 2d block
         n_threads   = N * Kld
         block_x     = Kld
-        smem_n_float32_per_thread = 3 
-        smem_const_additional = Mld
-        self.Kshapes2d_NxKld_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
+        smem_n_float32_per_thread = 2 
+        smem_n_float_per_y = Mld
+        smem_n_float_const = 1
+        self.Kshapes2d_NxKld_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
         #   N x Khd threads , 1d grid, 2d block
         n_threads   = N * Khd
         block_x     = Khd
-        smem_n_float32_per_thread = 6 
-        smem_const_additional = Mhd
-        self.Kshapes2d_NxKhd_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
+        smem_n_float32_per_thread = 2 
+        smem_n_float_per_y = Mhd
+        smem_n_float_const = 0
+        self.Kshapes2d_NxKhd_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
+
         #  N x __N_CAND_LD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_LD__
         block_x     = __N_CAND_LD__
-        smem_n_float32_per_thread = 9
-        smem_const_additional = Mld
-        self.Kshapes2d_NxNcandLD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
+        smem_n_float32_per_thread = 4
+        smem_n_float_per_y = Mld + 1
+        smem_n_float_const = 0
+        self.Kshapes2d_NxNcandLD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
+
         #  N x __N_CAND_HD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_HD__
         block_x     = __N_CAND_HD__
-        smem_n_float32_per_thread = 11 
-        smem_const_additional = Mhd
-        self.Kshapes2d_NxNcandHD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, 1, smem_const_additional)
-        
-        
-        
+        smem_n_float32_per_thread = 4 + (2) # +2 for testing, remove it
+        smem_n_float_per_y = Mhd + 1
+        smem_n_float_const = 0
+        self.Kshapes2d_NxNcandHD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
         # ------------ 3. kernels used for the tSNE gradients -------   
-
-
+        
         # ------------ 4. fetching the CUDA kernels -------
         self.min_max_reduction_cu  = self.compiled_cuda_code.get_function("perform_minMax_reduction")
         self.X_to_transpose_cu     = self.compiled_cuda_code.get_function("kernel_X_to_transpose")
@@ -1158,91 +1076,88 @@ def verify_neighdists(cu_X, cu_neighbours, cu_neighdists, cu_farthests, N, M, K,
     sum_dists  = np.zeros((K,), dtype=np.float32)
     last_dists = np.zeros((K,), dtype=np.float32)
     n_evals = 0.0
-    
-    for i in range(N):
-        do_comparison = np.random.uniform() < 0.0005
-        if(do_comparison):
-            scaling = 1.0
-            # GPU values
-            dists_according_to_gpu    = cpu_neighdists[i] *scaling
-            sum_dists  += dists_according_to_gpu
-            n_evals += 1.0
-            last_dists  = dists_according_to_gpu
-            farthest_according_to_gpu = cpu_farthestdists[i]  *scaling
-            # recompute on CPU
-            X_i = cpu_X[i]
-            for k in range(K):
-                j    = cpu_neighbours[i, k]
-                X_j  = cpu_X[j]
-                diff = (X_i - X_j)
-                cpu_neighdists_recomputed[i, k] = np.sum(diff*diff)  *scaling
-            farthest_according_to_cpu = np.max(cpu_neighdists_recomputed[i])
-            
-            abs_dist_differences = np.abs(cpu_neighdists_recomputed[i] - dists_according_to_gpu)
-            rel_diff = abs_dist_differences / np.mean(dists_according_to_gpu)
-            distances_all_close = np.mean(rel_diff) < 1e-5
-            farthest_ok         = (np.abs(farthest_according_to_cpu - farthest_according_to_gpu) / farthest_according_to_cpu < 1e-5)
 
-            if not farthest_ok:
-                if i < 3:
-                    print("farthest dists are wrong. This is normal after LD neighbours update. BUT HD NEIGHBBORUS UPDATES MUST ALSO UPDATE FARTHEST DISTS!!!")
-                farthest_ok = True
+    N_commparisons = 10
+    for comp in range(N_commparisons):
+        i = np.random.randint(0, N)
+        scaling = 1.0
+        # GPU values
+        dists_according_to_gpu    = cpu_neighdists[i] *scaling
+        sum_dists  += dists_according_to_gpu
+        n_evals += 1.0
+        last_dists  = dists_according_to_gpu
+        farthest_according_to_gpu = cpu_farthestdists[i]  *scaling
+        # recompute on CPU
+        X_i = cpu_X[i]
+        for k in range(K):
+            j    = cpu_neighbours[i, k]
+            X_j  = cpu_X[j]
+            diff = (X_i - X_j)
+            cpu_neighdists_recomputed[i, k] = np.sum(diff*diff)  *scaling
+        farthest_according_to_cpu = np.max(cpu_neighdists_recomputed[i])
+        
+        abs_dist_differences = np.abs(cpu_neighdists_recomputed[i] - dists_according_to_gpu)
+        rel_diff = abs_dist_differences / np.mean(dists_according_to_gpu)
+        distances_all_close = np.mean(rel_diff) < 1e-5
+        farthest_ok         = (np.abs(farthest_according_to_cpu - farthest_according_to_gpu) / farthest_according_to_cpu < 1e-5)
+        if not farthest_ok:
+            if i < 3:
+                print("farthest dists are wrong. This is normal after LD neighbours update. BUT HD NEIGHBBORUS UPDATES MUST ALSO UPDATE FARTHEST DISTS!!!")
+            farthest_ok = True
 
-            if (not distances_all_close)  or (not farthest_ok):
-                # print the index where the distances anr not all close
-                idx_different = np.where(abs_dist_differences > 1e-5)[0]
-                print("idx_different : ", idx_different)
+        if (not distances_all_close)  or (not farthest_ok):
+            # print the index where the distances anr not all close
+            idx_different = np.where(abs_dist_differences > 1e-5)[0]
+            print("idx_different : ", idx_different)
 
-                print("i :", i)
-                print("neigh[:17] ", cpu_neighbours[i][:17])
-                print("diff: ", abs_dist_differences[:17])
-                print("GPU:  ", np.round(dists_according_to_gpu, 2)[:17])
-                print("cpu:  ", np.round(cpu_neighdists_recomputed[i], 2)[:17])
-                print("----  farthest dists     GPU : ", farthest_according_to_gpu, "CPU : ", farthest_according_to_cpu)
-                print("distances_all_close: ", distances_all_close, "farthest_ok: ", farthest_ok)
+            print("i :", i)
+            print("neigh[:17] ", cpu_neighbours[i][:17])
+            print("diff: ", abs_dist_differences[:17])
+            print("GPU:  ", np.round(dists_according_to_gpu, 2)[:17])
+            print("cpu:  ", np.round(cpu_neighdists_recomputed[i], 2)[:17])
+            print("----  farthest dists     GPU : ", farthest_according_to_gpu, "CPU : ", farthest_according_to_cpu)
+            print("distances_all_close: ", distances_all_close, "farthest_ok: ", farthest_ok)
 
-                largest_diff = np.max(abs_dist_differences)
-                print("largest disance difference : ", largest_diff)
-                raise Exception("error with neighs and dists")
-            # check that each neighbour is unique
-            neighbours = cpu_neighbours[i]
-            for k1 in range(K):
-                j1 = neighbours[k1]
-                if j1 == i:
-                    print("i : ",i,   "   k1", k1,  "   j1", j1)
+            largest_diff = np.max(abs_dist_differences)
+            print("largest disance difference : ", largest_diff)
+            raise Exception("error with neighs and dists")
+        # check that each neighbour is unique
+        neighbours = cpu_neighbours[i]
+        for k1 in range(K):
+            j1 = neighbours[k1]
+            if j1 == i:
+                print("i : ",i,   "   k1", k1,  "   j1", j1)
+                print("neighbours[:32]:",neighbours[:32])
+                raise Exception("neighbour is the point itself")
+            for k2 in range(k1+1, K):
+                j2 = neighbours[k2]
+                if j1 == j2:
                     print("neighbours[:32]:",neighbours[:32])
-                    raise Exception("neighbour is the point itself")
-                for k2 in range(k1+1, K):
-                    j2 = neighbours[k2]
-                    if j1 == j2:
-                        print("neighbours[:32]:",neighbours[:32])
-                        print("same neighbours : ", j1, j2, " at indices : ", k1, k2)
-                        raise Exception("neighbours are not unique")
-                    
-            if(i > 100000):
-                break
-            # short sortedness
-            for k in range(K-1):
-                if cpu_neighdists[i, k] > cpu_neighdists[i, k+1]:
-                    sortedness_short += 1.0
-                else:
-                    sortedness_short += -1.0
-                n_votes_short += 1
-            # far sortedness
-            for k in range(K):
-                idx  = k 
-                idx2 = np.random.randint(0, K)
-                if idx == idx2:
-                    continue
-                if idx2 < idx:
-                    tmpi = idx2
-                    idx2 = idx 
-                    idx  = tmpi
-                if cpu_neighdists[i, idx] > cpu_neighdists[i, idx2]:
-                    sortedness_far += 1.0
-                else:
-                    sortedness_far += -1.0
-                n_votes_far += 1
+                    print("same neighbours : ", j1, j2, " at indices : ", k1, k2)
+                    raise Exception("neighbours are not unique")
+                
+        # short sortedness
+        for k in range(K-1):
+            if cpu_neighdists[i, k] > cpu_neighdists[i, k+1]:
+                sortedness_short += 1.0
+            else:
+                sortedness_short += -1.0
+            n_votes_short += 1
+        # far sortedness
+        for k in range(K):
+            idx  = k 
+            idx2 = np.random.randint(0, K)
+            if idx == idx2:
+                continue
+            if idx2 < idx:
+                tmpi = idx2
+                idx2 = idx 
+                idx  = tmpi
+            if cpu_neighdists[i, idx] > cpu_neighdists[i, idx2]:
+                sortedness_far += 1.0
+            else:
+                sortedness_far += -1.0
+            n_votes_far += 1 
     sortedness_far    /= n_votes_far
     sortedness_short  /= n_votes_short
     print("OK    sortedness_far: ", sortedness_far, "sortedness_short: ", sortedness_short)
