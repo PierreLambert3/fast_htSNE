@@ -321,7 +321,8 @@ __device__ __forceinline__ void reduce1d_argmax_float(float* vector, uint32_t* p
     __syncthreads();
     uint32_t prev_len = 2u * n;  
     uint32_t stride   = n;     
-    while(stride > 32u){ 
+    //while(stride > 32u){ 
+    while(stride > 1u){ 
         prev_len = stride; 
         stride   = (uint32_t) ceilf((float)prev_len * 0.5f);
         if(i + stride < prev_len){
@@ -812,7 +813,6 @@ __global__ void kernel_doubleSumReduction_one_step(double* input_vector, double*
     }
 }
 
-
 __global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uint32_t* output_vector, uint32_t input_size){
     extern __shared__ uint32_t smem_uint32_tSumReduction_one_step[];
     uint32_t i_global = blockIdx.x * blockDim.x + threadIdx.x;
@@ -829,22 +829,69 @@ __global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uin
 // -------------------------------------  candidate neighbours  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
 __global__ void update_HD_sim_and_local_state_euclidean(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, float* Xhd, uint32_t* knn_HD_write, float* sqdists_HD_write, float* invRadii_HD, float* Pasm, float* Pasym_sums, float* Psym, uint32_t* Psym_knn){
+    /*
+    IMPORTANT: need to use 2 P matrices and 2 kernels, else during the last step of symmetrization there is concurrency 
+    */
     return;
 }
 
-__global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t* knn_LD_read, uint32_t seed_shared){
+__global__ void kernel_HD_redetermine_farthest_dists_and_sort(uint32_t N, uint32_t Mhd, uint32_t seed_shared, uint32_t* has_new_HD_neighs, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    if(obs_i_global >= N){
+        return;
+    }
+    bool has_new_HD_neighs_obs_i = has_new_HD_neighs[obs_i_global];
+    uint32_t seed_here = seed_shared + obs_i_global;
+    random_uint32_t_xorshift32(&seed_here);
+    
+    bool force_sort = (seed_here % 50) == 0;
+    if(!has_new_HD_neighs_obs_i && !force_sort){
+        return;
+    }
+    
+    // init shared memory
+    extern __shared__ float smem_HD_distancesforfar[];
+    float*    smem_sqdists           = &smem_HD_distancesforfar[obs_i_in_block * KHD];
+    uint32_t* smem_idxs_neighs       = (uint32_t*) &smem_HD_distancesforfar[n_obs_in_block * KHD + obs_i_in_block * KHD];
+    smem_sqdists[k]     = sqdists_HD_write[obs_i_global * KHD + k];
+    smem_idxs_neighs[k] = knn_HD_write[obs_i_global * KHD + k];
+    __syncthreads();
+    
+    // sort the distances approximately
+    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
+    reduce1d_argmax_float(smem_sqdists, smem_idxs_neighs, KHD, k);
+    __syncthreads();
+    if(k == 0){ // save the farthest distance before swaps
+        farthest_dist_HD_write[obs_i_global] = smem_sqdists[0];
+    }
+
+    // --------  sorting helper with greedy swaps at non-overlapping indices (really fast). These completely change the dynamics of successive reduce1d_argmax_float calls by breaking the patterns --------
+    bool k_divisible_by_2 = (k % 2) == 0;
+    bool k_divisible_by_3 = (k % 3) == 0;
+    magicSwaps_global(smem_sqdists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed_shared);
+    magicSwaps_local(smem_sqdists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
+    __syncthreads();
+
+    // --------  write dists and neigbours to global memory  --------
+    float sq_eucl = smem_sqdists[k];
+    uint32_t j    = smem_idxs_neighs[k]; // likely different j (during parallel reduction)
+    knn_HD_write[obs_i_global*KHD + k] = j;
+    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
+    
+    return;
+}
+
+__global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t* knn_LD_read, uint32_t seed_shared){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t cand_number    = threadIdx.x; 
     uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
     if(obs_i_global >= N){
         return;}
-
-    //ONLY 30 OBSERVATIONS PER BLOCK
-
-    const uint32_t lookat_rand_until     = 5u;
-    const uint32_t lookat_LDneighs_until = lookat_rand_until + ((N_CAND_HD - lookat_rand_until) / 2u);
-    const uint32_t lookat_HDneighs_until = N_CAND_HD;
+    
     extern __shared__ float smem_HD_candidates_eucl[];
     // ------- init  shared memory -------
     uint32_t offset_smem = 0u;
@@ -860,10 +907,6 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     uint32_t* smem_reductionslocal = (uint32_t*) &smem_perms_retained[0];
     offset_smem              += n_obs_in_block * N_CAND_HD;
     uint32_t* smem_collisions = (uint32_t*) &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
-    offset_smem              += n_obs_in_block * N_CAND_HD;
-    uint32_t* smem_collisions_candVcand = (uint32_t*) &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
-    offset_smem              += n_obs_in_block * N_CAND_HD;
-    uint32_t* smem_collisions_candVneigh = (uint32_t*) &smem_HD_candidates_eucl[offset_smem + obs_i_in_block*N_CAND_HD];
     
     cand_dists[cand_number] = 142u;
     cand_idxs[cand_number]   = 42u;
@@ -896,24 +939,58 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
 
     __syncthreads();  // sync for smem
     // ------- init  a local seed -------
-    uint32_t seed_local = seed_shared + obs_i_global*7312u + cand_number*2u;
+    uint32_t seed_local = seed_shared + obs_i_global + cand_number;
     random_uint32_t_xorshift32(&seed_local);
     // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in LD or HD -------
+    const uint32_t lookat_rand_until     = 3u;
     uint32_t cand = 0u;
     if(cand_number < lookat_rand_until){ // random index
         cand = random_uint32_t_xorshift32(&seed_local) % N;
     }
-    else if (cand_number < lookat_LDneighs_until){
-        uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KLD;
-        uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KLD;
-        uint32_t neighbour = knn_LD_read[obs_i_global*KLD + r1];
-        cand = knn_LD_read[neighbour*KLD + r2];
-    } 
-    else{
-        uint32_t r1 = random_uint32_t_xorshift32(&seed_local) % KHD;
-        uint32_t r2 = random_uint32_t_xorshift32(&seed_local) % KHD;
-        uint32_t neighbour = knn_HD_read[obs_i_global*KHD + r1];
-        cand = knn_HD_read[neighbour*KHD + r2];
+    else{ // mean farD:  1243.384  diff_v_EMA:  -0.29     pct_new_HD_neighs:  0.355   i: 500 
+        uint32_t r1     = random_uint32_t_xorshift32(&seed_local) % 1024;
+        bool look_in_HD = (r1 < (1024 * 3 / 4));
+        const bool biased_Ks          = true;
+        const bool jump_between_HD_LD = true;
+        // const uint32_t maxDepth = 2u;     // mean farD:  1143.0645  diff_v_EMA:  -0.06     pct_new_HD_neighs:  0.093   i: 1000
+        const uint32_t maxDepth = 1u;  // mean farD:  1135.8517  diff_v_EMA:  -0.02     pct_new_HD_neighs:  0.052   i: 1000
+        uint32_t random_depth   = random_uint32_t_xorshift32(&seed_local) % 1024;
+        uint32_t depth_todo     = 1u + ((random_depth * maxDepth) / 1024);
+        uint32_t depth          = 0u;
+        uint32_t first_j = 0u;
+        if(look_in_HD){
+            uint32_t rand_k = random_uint32_t_xorshift32(&seed_local) % KHD;
+            first_j = knn_HD_read[obs_i_global * KHD + rand_k];
+        }
+        else{
+            uint32_t rand_k = random_uint32_t_xorshift32(&seed_local) % KLD;
+            first_j = knn_LD_read[obs_i_global * KLD  + rand_k];
+        }
+        uint32_t j_from = obs_i_global;
+        uint32_t j_to   = first_j;
+        while(depth < depth_todo){
+            j_from = j_to;
+            j_to   = 0u;
+            uint32_t k_to = 0u;
+            if(jump_between_HD_LD){
+                r1 = random_uint32_t_xorshift32(&seed_local) % 1024;
+                look_in_HD = (r1 < 512);
+            }
+            uint32_t  K    = (look_in_HD) ? KHD : KLD;
+            uint32_t* knns = (look_in_HD) ? knn_HD_read : knn_LD_read;
+            if(biased_Ks){
+                uint32_t k1 = random_uint32_t_xorshift32(&seed_local) % K;
+                uint32_t k2 = random_uint32_t_xorshift32(&seed_local) % K;
+                k_to = max(k1, k2);
+                j_to = knns[j_from * K + k_to];
+            }
+            else{
+                k_to = random_uint32_t_xorshift32(&seed_local) % K;
+                j_to = knns[j_from * K + k_to];
+            }
+            depth = depth + 1u;
+        }
+        cand = j_to;    
     }
     // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in LD or HD -------
     while(cand == obs_i_global){
@@ -932,7 +1009,13 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     bool cand_divisible_by_3 = (cand_number % 3) == 0;
     magicSwaps_global_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, seed_shared);
     magicSwaps_local_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, cand_divisible_by_3);
-    seed_shared = (seed_shared / 2u) + 209383u;
+    seed_shared = random_uint32_t_xorshift32(&seed_shared);
+    magicSwaps_global_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, cand_divisible_by_3);
+    seed_shared = random_uint32_t_xorshift32(&seed_shared);
+    magicSwaps_global_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, seed_shared);
+    magicSwaps_local_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, cand_divisible_by_3);
+    seed_shared = random_uint32_t_xorshift32(&seed_shared);
     magicSwaps_global_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, seed_shared);
     magicSwaps_local_ascending(cand_dists, cand_idxs, cand_number, N_CAND_HD, cand_divisible_by_2, cand_divisible_by_3);
 
@@ -944,8 +1027,8 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
 
     // ------- find "cand_R": the number of cand that are retained (there are the N_leftmost in cand_idxs) -------
     __syncthreads();
-    uint32_t here_value = 0u;
     float farthest  = farthest_dist_ptr[0u];
+    uint32_t here_value = 0u;
     float dist_here = cand_distance;
     if(dist_here < farthest){
         float to_beat_1to1 = sqdists_HD_write[obs_i_global*KHD + cand_number];
@@ -955,7 +1038,7 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     }
     smem_perms_retained[cand_number] = here_value;
     __syncthreads();
-    if(cand_number > 0u){
+        if(cand_number > 0u){
         if(cand_number > 1u && smem_perms_retained[cand_number - 2u] == 0u){
             here_value = 0u;} 
         if(smem_perms_retained[cand_number - 1u] == 0u){
@@ -969,15 +1052,14 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     }
     __syncthreads();
     smem_perms_retained[cand_number] = here_value;
+
     reduce1d_max_uint32(smem_perms_retained, N_CAND_HD, cand_number);
     uint32_t cand_R = smem_perms_retained[0];
     __syncthreads();
-    
-    smem_collisions[cand_number]            = 0u;
+    smem_collisions[cand_number] = 0u;
     __syncthreads();
 
     // filter candidates where cand_dist > neighdist_at_same_idx (the cand_R upper bound is not a strict guarantee for the candidate to be closer than its associated neighbour)
-    __syncthreads();
     if(cand_number < cand_R){
         uint32_t cand_idx = cand_idxs[cand_number];
         float cand_dist   = cand_dists[cand_number];
@@ -988,11 +1070,9 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     }
     __syncthreads();
 
-
-
-    // -------------- PARALLEL --------------
+    // -------------- Collision detection --------------
     // 1. pre-load in parallel parts of KHD neighbours for each observation
-    // will have a loop with astrided iteration on the neighbours, with step = N_CAND_HD. 
+    // will have a loop with a strided iteration on the neighbours, with step = N_CAND_HD. 
     // determine the loop params
     const uint32_t stride  = N_CAND_HD;
     uint32_t n_steps = (KHD + stride - 1u) / stride;
@@ -1020,17 +1100,27 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     uint32_t self_j      = cand_idxs[cand_number];
     bool  self_is_winner = self_cursor < cand_R;
     for(uint32_t current_cursor = 0u; current_cursor < cand_R; current_cursor++){
-        uint32_t current_j = cand_idxs[current_cursor];
+        __syncthreads();
         smem_reductionslocal[self_cursor] = 0u;
+        uint32_t current_j = cand_idxs[current_cursor];
         // 2.1. collision with other candidates
         if(self_is_winner && self_cursor != current_cursor){
             if(self_j == current_j){
                 smem_reductionslocal[self_cursor] = 1u;
             }
         }
-        __syncthreads();
-        // 2.2. collision with  neighbours
-        __syncthreads();
+        /*
+        reduce1d_max_uint32_t(smem_reductionslocal, cand_R, self_cursor);
+        bool early_hit = smem_reductionslocal[0] > 0u;
+        if(early_hit && self_cursor == current_cursor){
+            smem_collisions[self_cursor] = 1u;
+        }
+        if(early_hit){
+            continue;
+        }
+        */
+
+        // 2.2. collision with neighbours
         bool hit = false;
         for(uint32_t step = 0u; step < n_steps; step++){
             uint32_t idx = step * stride + cand_number;
@@ -1039,7 +1129,7 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
                 step_neigh_j = strided_8knn_HD[step];
             }
             else{
-                step_neigh_j = knn_HD_write[obs_i_global*KHD + idx];
+                step_neigh_j = knn_HD_write[obs_i_global*KHD + idx]; //   VERY SLOW !!! perhaps tweak the number of saved strides 
             }
             if(step_neigh_j == current_j){
                 hit = true;
@@ -1049,7 +1139,6 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
             smem_reductionslocal[self_cursor] = 1u;
         }
         reduce1d_max_uint32_t(smem_reductionslocal, N_CAND_HD, self_cursor);
-        __syncthreads();
         if(self_cursor == current_cursor){
             bool has_collision = smem_reductionslocal[0] > 0u;
             if(has_collision){
@@ -1060,78 +1149,29 @@ __global__ void candidates_HD_generate_and_sort_euclidean(uint32_t N, uint32_t M
     }
     __syncthreads();
     
-
-
-    if( cand_number >= cand_R){
-        return;
-    }
-    if(!(smem_collisions[cand_number]>0u)){
-        knn_HD_write[obs_i_global*KHD + cand_number]     = cand_idxs[cand_number];
-        sqdists_HD_write[obs_i_global*KHD + cand_number] = cand_dists[cand_number];
-        // if(obs_i_global == 0u ){
-        //     printf(" - ");
-        // }
-    }
-
-    // TODO : UPDATE FARTHEST DISTANCE (else bad neighbour candidates will be retained)
-    // TODO : UPDATE FARTHEST DISTANCE (else bad neighbour candidates will be retained)
-    // TODO : UPDATE FARTHEST DISTANCE (else bad neighbour candidates will be retained)
-    // TODO : UPDATE FARTHEST DISTANCE (else bad neighbour candidates will be retained)
-    // TODO : UPDATE FARTHEST DISTANCE (else bad neighbour candidates will be retained)
-
-    return;
-
-
-    /*
-    -------------------------- working sequential ground truth --------------------------
-    if(cand_number == 0u){
-        for(uint32_t curr_cand = 0u; curr_cand < cand_R; curr_cand++){
-            uint32_t cand_idx = cand_idxs[curr_cand];
-            // -------------- SEQUENTIAL --------------
-            // check that unique within candidates
-            bool is_unique_SEQUENTIAL1 = true;
-            for(uint32_t other_cand = 0u; other_cand < N_CAND_HD; other_cand++){
-                if(curr_cand != other_cand){
-                    if(cand_idx == cand_idxs[other_cand]){
-                        is_unique_SEQUENTIAL1 = false;
-                        break;
-                    }
-                }
-            }
-            // check that unique within neighbours
-            bool is_unique_SEQUENTIAL2 = true;
-            for(uint32_t k = 0u; k < KHD; k++){
-                if(cand_idx == knn_HD_write[obs_i_global*KHD + k]){
-                    is_unique_SEQUENTIAL2 = false;
-                    break;
-                }
-            }
-            
-            // -------------- add the candidate if unique --------------
-            smem_collisions[curr_cand] = 1u;
-            if(is_unique_SEQUENTIAL1 && is_unique_SEQUENTIAL2){
-                smem_collisions[curr_cand] = 0u;
-            }
-        }
-    }
-    __syncthreads();
-    if(cand_number < cand_R){
-        bool can_add = smem_collisions[cand_number] == 0u;
-        if(can_add){
+    smem_reductionslocal[cand_number] = 0u;
+    if( cand_number < cand_R){
+        if(!(smem_collisions[cand_number]>0u)){
             knn_HD_write[obs_i_global*KHD + cand_number]     = cand_idxs[cand_number];
             sqdists_HD_write[obs_i_global*KHD + cand_number] = cand_dists[cand_number];
-            if(obs_i_global == 0u){
-                printf("adding new neighour (not necessarily closer)   cand_R: %u\\n", cand_R);
-            }
+            smem_reductionslocal[cand_number] = 1u;
+
+            //if(obs_i_global == N-1u ){
+            //    printf("-");
+            //}
         }
     }
-    return;
-    -------------------------- working sequential ground truth --------------------------
+    /*
+    if(obs_i_global == N-1u ){
+        printf("\\n cand_R  %u\\n", cand_R);
+    }
     */
 
-
-
-
+    // determine if the obs had a new neighbour
+    reduce1d_max_uint32_t(smem_reductionslocal, cand_R, cand_number);
+    if(cand_number == 0u ){
+        has_new_HD_neighs[obs_i_global] = smem_reductionslocal[0];
+    }
     return;
 }
 
@@ -1145,9 +1185,6 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
     if(obs_i_global >= N){
         return;}
-    const uint32_t lookat_rand_until     = 6u;
-    const uint32_t lookat_LDneighs_until = lookat_rand_until + ((N_CAND_LD - lookat_rand_until) / 2u);
-    const uint32_t lookat_HDneighs_until = N_CAND_LD;
     // ------- init  shared memory -------
     uint32_t offset_smem = 0u;
     float*    X_i             = &smem_LD_candidates[offset_smem + obs_i_in_block * Mld];
@@ -1186,9 +1223,57 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     }
     __syncthreads();  // sync for smem
     // ------- init  a local seed -------
-    uint32_t seed_local = seed_shared + (obs_i_global*N_CAND_LD)*2387u + cand_number*2u;
+    uint32_t seed_local = seed_shared + (obs_i_global*N_CAND_LD)*2387u + cand_number;
     random_uint32_t_xorshift32(&seed_local);
     // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in LD or HD -------
+    
+    
+
+    uint32_t cand = 0u;
+    const uint32_t lookat_rand_until = 2u;
+    if(cand_number < lookat_rand_until){ // random index
+        cand = random_uint32_t_xorshift32(&seed_local) % N;
+    }
+    else{
+        uint32_t r1     = random_uint32_t_xorshift32(&seed_local) % 1024;
+        bool look_in_HD = (r1 < 1024 / 6);
+        const bool biased_Ks    = true;
+        const uint32_t maxDepth = 1u;
+        uint32_t random_depth   = random_uint32_t_xorshift32(&seed_local) % 1024;
+        uint32_t depth_todo     = 1u + ((random_depth * maxDepth) / 1024);
+        uint32_t depth          = 0u;
+        uint32_t first_j = 0u;
+        if(look_in_HD){
+            uint32_t rand_k = random_uint32_t_xorshift32(&seed_local) % KHD;
+            first_j = knn_HD_read[obs_i_global * KHD + rand_k];
+        }
+        else{
+            uint32_t rand_k = random_uint32_t_xorshift32(&seed_local) % KLD;
+            first_j = knn_LD_read[obs_i_global * KLD  + rand_k];
+        }
+        uint32_t j_from = obs_i_global;
+        uint32_t j_to   = first_j;
+        while(depth < depth_todo){
+            j_from = j_to;
+            j_to   = 0u;
+            uint32_t k_to = 0u;
+            uint32_t  K    = (look_in_HD) ? KHD : KLD;
+            uint32_t* knns = (look_in_HD) ? knn_HD_read : knn_LD_read;
+            uint32_t k1 = random_uint32_t_xorshift32(&seed_local) % K;
+            uint32_t k2 = random_uint32_t_xorshift32(&seed_local) % K;
+            k_to = max(k1, k2);
+            j_to = knns[j_from * K + k_to];
+            depth = depth + 1u;
+        }
+        cand = j_to;
+    }
+    // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in LD or HD -------
+    while(cand == obs_i_global){
+        cand = random_uint32_t_xorshift32(&seed_local) % N;
+    }
+
+    
+    /*
     uint32_t cand = 0u;
     if(cand_number < lookat_rand_until){ // random index
         cand = random_uint32_t_xorshift32(&seed_local) % N;
@@ -1208,6 +1293,8 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     while(cand == obs_i_global){
         cand = random_uint32_t_xorshift32(&seed_local) % N;
     }
+    */
+
     cand_idxs[cand_number] = cand;
     // ------- compute the distance to the candidate -------
     float* X_cand = &Xld_read[cand * Mld];
@@ -1463,6 +1550,20 @@ __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float
     bool k_divisible_by_3 = (k % 3) == 0;
     magicSwaps_global(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed);
     magicSwaps_local(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
+    
+
+    seed = seed + 302743u;
+    magicSwaps_global(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed);
+    magicSwaps_local(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
+
+    seed = seed + 102233u;
+    magicSwaps_global(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed);
+    magicSwaps_local(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
+    /*
+    seed = seed + 302743u;
+    magicSwaps_global(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed);
+    magicSwaps_local(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
+    */
 
     // --------  write dists and neigbours to global memory  --------
     __syncthreads();
@@ -1477,191 +1578,18 @@ __global__ void compute_all_HD_sqdists_euclidean(uint32_t N, uint32_t Mhd, float
 }
 __global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
     extern __shared__ float smem_HD_sqdists_manhattan[];
-    uint32_t n_obs_in_block = blockDim.y;
-    uint32_t obs_i_in_block = threadIdx.y;
-    uint32_t k              = threadIdx.x;
-    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
-
-    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
-        return;}
-    bool is_0_thread = (k == 0u);
-    uint32_t j = knn_HD_read[obs_i_global*KHD + k]; // <--------- SLOW (global memory read)
-
-    // --------  shared memory partition  --------
-    float* X_i                   = &smem_HD_sqdists_manhattan[obs_i_in_block * Mhd];
-    float* smem_dists            = &smem_HD_sqdists_manhattan[n_obs_in_block * Mhd + obs_i_in_block*KHD];
-    uint32_t* smem_idxs_neighs = (uint32_t*) &smem_HD_sqdists_manhattan[n_obs_in_block * Mhd + n_obs_in_block*KHD + obs_i_in_block*KHD]; // it's okay
-
-    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
-    if(KHD >= Mhd){ //  coalesced access to global memory: nice
-        if(k < Mhd){
-            float Xi_m = Xhd[obs_i_global * Mhd + k]; // <--------- SLOW (global memory read)
-            X_i[k]     = Xi_m;
-        }
-    }
-    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
-        if(is_0_thread){
-            float* Xi_globalmem = &Xhd[obs_i_global * Mhd]; // <--------- SLOW (global memory read)
-            for(uint32_t m = 0; m < Mhd; m++){
-                float Xi_m = Xi_globalmem[m];
-                X_i[m]     = Xi_m;
-            }
-        }
-    }
-    __syncthreads();  // sync for smem 
-
-    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
-    float* X_j     = &Xhd[j * Mhd];  // compute the global memory address of Xj
-    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
-    smem_dists[k]  = sq_eucl;
-    smem_idxs_neighs[k] = j;
-    __syncthreads();
-
-    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
-    reduce1d_argmax_float(smem_dists, smem_idxs_neighs, KHD, k);
-
-    // --------  sorting helper with greedy swaps at non-overlapping indices (really fast). These completely change the dynamics of successive reduce1d_argmax_float calls by breaking the patterns --------
-    bool k_divisible_by_2 = (k % 2) == 0;
-    bool k_divisible_by_3 = (k % 3) == 0;
-    magicSwaps_global(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed);
-    magicSwaps_local(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
-
-    // --------  write dists and neigbours to global memory  --------
-    __syncthreads();
-    sq_eucl = smem_dists[k];
-    j       = (uint32_t) smem_idxs_neighs[k]; // likely different j (during parallel reduction)
-    knn_HD_write[obs_i_global*KHD + k] = j;
-    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
-    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
-        farthest_dist_HD_write[obs_i_global] = sq_eucl;
-    }
+    printf("remove function and doo all in one function with a if calling the appropriate metric\\n");
     return;
 }
 __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
     extern __shared__ float smem_HD_sqdists_cosine[];
-    uint32_t n_obs_in_block = blockDim.y;
-    uint32_t obs_i_in_block = threadIdx.y;
-    uint32_t k              = threadIdx.x;
-    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
-
-    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
-        return;}
-    bool is_0_thread = (k == 0u);
-    uint32_t j = knn_HD_read[obs_i_global*KHD + k]; // <--------- SLOW (global memory read)
-
-    // --------  shared memory partition  --------
-    float* X_i                   = &smem_HD_sqdists_cosine[obs_i_in_block * Mhd];
-    float* smem_dists            = &smem_HD_sqdists_cosine[n_obs_in_block * Mhd + obs_i_in_block*KHD];
-    uint32_t* smem_idxs_neighs = (uint32_t*) &smem_HD_sqdists_cosine[n_obs_in_block * Mhd + n_obs_in_block*KHD + obs_i_in_block*KHD]; // it's okay
-
-    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
-    if(KHD >= Mhd){ //  coalesced access to global memory: nice
-        if(k < Mhd){
-            float Xi_m = Xhd[obs_i_global * Mhd + k]; // <--------- SLOW (global memory read)
-            X_i[k]     = Xi_m;
-        }
-    }
-    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
-        if(is_0_thread){
-            float* Xi_globalmem = &Xhd[obs_i_global * Mhd]; // <--------- SLOW (global memory read)
-            for(uint32_t m = 0; m < Mhd; m++){
-                float Xi_m = Xi_globalmem[m];
-                X_i[m]     = Xi_m;
-            }
-        }
-    }
-    __syncthreads();  // sync for smem 
-
-    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
-    float* X_j     = &Xhd[j * Mhd];  // compute the global memory address of Xj
-    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
-    smem_dists[k]  = sq_eucl;
-    smem_idxs_neighs[k] = j;
-    __syncthreads();
-
-    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
-    reduce1d_argmax_float(smem_dists, smem_idxs_neighs, KHD, k);
-
-    // --------  sorting helper with greedy swaps at non-overlapping indices (really fast). These completely change the dynamics of successive reduce1d_argmax_float calls by breaking the patterns --------
-    bool k_divisible_by_2 = (k % 2) == 0;
-    bool k_divisible_by_3 = (k % 3) == 0;
-    magicSwaps_global(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed);
-    magicSwaps_local(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
-
-    // --------  write dists and neigbours to global memory  --------
-    __syncthreads();
-    sq_eucl = smem_dists[k];
-    j       = (uint32_t) smem_idxs_neighs[k]; // likely different j (during parallel reduction)
-    knn_HD_write[obs_i_global*KHD + k] = j;
-    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
-    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
-        farthest_dist_HD_write[obs_i_global] = sq_eucl;
-    }
-    
+    printf("remove function and doo all in one function with a if calling the appropriate metric\\n");
     return;
 }
 
 __global__ void compute_all_HD_sqdists_custom(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
     extern __shared__ float smem_HD_sqdists_custom[];
-    uint32_t n_obs_in_block = blockDim.y;
-    uint32_t obs_i_in_block = threadIdx.y;
-    uint32_t k              = threadIdx.x;
-    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
-
-    if(obs_i_global >= N){ //  no need to check for k: sizes are adjusted on CPU to be correct
-        return;}
-    bool is_0_thread = (k == 0u);
-    uint32_t j = knn_HD_read[obs_i_global*KHD + k]; // <--------- SLOW (global memory read)
-
-    // --------  shared memory partition  --------
-    float* X_i                   = &smem_HD_sqdists_custom[obs_i_in_block * Mhd];
-    float* smem_dists            = &smem_HD_sqdists_custom[n_obs_in_block * Mhd + obs_i_in_block*KHD];
-    uint32_t* smem_idxs_neighs = (uint32_t*) &smem_HD_sqdists_custom[n_obs_in_block * Mhd + n_obs_in_block*KHD + obs_i_in_block*KHD]; // it's okay
-
-    // --------  Xi: load  Xi to shared memory (todo: make euclidean faster by prefetching to smem during loop?)  --------
-    if(KHD >= Mhd){ //  coalesced access to global memory: nice
-        if(k < Mhd){
-            float Xi_m = Xhd[obs_i_global * Mhd + k]; // <--------- SLOW (global memory read)
-            X_i[k]     = Xi_m;
-        }
-    }
-    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
-        if(is_0_thread){
-            float* Xi_globalmem = &Xhd[obs_i_global * Mhd]; // <--------- SLOW (global memory read)
-            for(uint32_t m = 0; m < Mhd; m++){
-                float Xi_m = Xi_globalmem[m];
-                X_i[m]     = Xi_m;
-            }
-        }
-    }
-    __syncthreads();  // sync for smem 
-
-    // -------- Xj & euclidean distance: (todo: make this efficient, pre fetch part of Xj to smem alongside the distance loop!)  --------
-    float* X_j     = &Xhd[j * Mhd];  // compute the global memory address of Xj
-    float  sq_eucl = squared_euclidean_distance(X_i, X_j, Mhd);
-    smem_dists[k]  = sq_eucl;
-    smem_idxs_neighs[k] = j;
-    __syncthreads();
-
-    // --------  find the farthest distance (& agrsort~ish the array descending, for free)  --------
-    reduce1d_argmax_float(smem_dists, smem_idxs_neighs, KHD, k);
-
-    // --------  sorting helper with greedy swaps at non-overlapping indices (really fast). These completely change the dynamics of successive reduce1d_argmax_float calls by breaking the patterns --------
-    bool k_divisible_by_2 = (k % 2) == 0;
-    bool k_divisible_by_3 = (k % 3) == 0;
-    magicSwaps_global(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, seed);
-    magicSwaps_local(smem_dists, smem_idxs_neighs, k, KHD, k_divisible_by_2, k_divisible_by_3);
-
-    // --------  write dists and neigbours to global memory  --------
-    __syncthreads();
-    sq_eucl = smem_dists[k];
-    j       = (uint32_t) smem_idxs_neighs[k]; // likely different j (during parallel reduction)
-    knn_HD_write[obs_i_global*KHD + k] = j;
-    sqdists_HD_write[obs_i_global*KHD + k] = sq_eucl;
-    if(is_0_thread){ // k=0 contains the furthest dist after  reduction
-        farthest_dist_HD_write[obs_i_global] = sq_eucl;
-    }
-    
+    printf("remove function and doo all in one function with a if calling the appropriate metric\\n");
     return;
 }
 
