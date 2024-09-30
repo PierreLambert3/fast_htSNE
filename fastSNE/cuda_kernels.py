@@ -12,6 +12,13 @@ all_the_cuda_code = """
 #define N_CAND_LD (32u)
 #define N_CAND_HD (32u)
 
+/*
+#define N_CAND_HD (8u) <--- il faut faire N_cand beaucoup plus faible? vu que cand_R devient < 4 tres rapidement
+
+ca donne self.candidates_HD_generate_and_sort_euclidean_cu
+--> probablement le strided index: esssayer  avec indices directs
+*/
+
 __global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kld, uint32_t* n_cand_ld, uint32_t* n_cand_hd){
     *max_perplexity = MAX_PERPLEXITY;
     *khd            = KHD;
@@ -835,6 +842,101 @@ __global__ void update_HD_sim_and_local_state_euclidean(uint32_t N, uint32_t Mhd
     return;
 }
 
+  
+__global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neighs_acc, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, float* invRadii_HD, float* Psym, uint32_t* P_knn, float* Pasym_sums, uint32_t seed){
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    if(obs_i_global >= N){
+        return;
+    }
+    bool is_main = (k == 0);
+    extern __shared__ float _2smem_radiiP[];
+    // ~~~~~~~~ check if the observation has new HD neighbours  ~~~~~~~~
+    uint32_t* smem_temp_uint32_t = (uint32_t*) &_2smem_radiiP[obs_i_in_block];
+    if(is_main){
+        smem_temp_uint32_t[0] = cuda_has_new_HD_neighs_acc[obs_i_global];
+    }
+    __syncthreads();
+    if(smem_temp_uint32_t[0] < 1u){
+        return;
+    }
+    smem_temp_uint32_t[0] = 0u;
+    __syncthreads();
+    return;
+}
+
+__device__ __forceinline__ float entropy_given_ivRad(float ivRad, float* sqDists, float* temp_pijs){
+    return;
+}
+
+__global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32_t* cuda_has_new_HD_neighs_acc, uint32_t* knn_HD_write, float* sqdists_HD_write,\
+                                 float* farthest_dist_HD_write, float* invRadii_HD, float* Pasm, uint32_t* P_knn, float* Pasym_sums, uint32_t seed){
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t k              = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    if(obs_i_global >= N){
+        return;
+    }
+    bool is_main = (k == 0);
+    extern __shared__ float _smem_radiiP[];
+
+    // ~~~~~~~~ check if the observation has new HD neighbours  ~~~~~~~~
+    uint32_t* smem_temp_uint32_t = (uint32_t*) &_smem_radiiP[obs_i_in_block];
+    if(is_main){
+        smem_temp_uint32_t[0] = cuda_has_new_HD_neighs_acc[obs_i_global];
+    }
+    __syncthreads();
+    if(smem_temp_uint32_t[0] < 1u){
+        return;
+    }
+    __syncthreads();
+
+    // ~~~~~~~~ load init invRadii  ~~~~~~~~
+    if(is_main){
+        smem_temp_uint32_t[0] = invRadii_HD[obs_i_global];
+    }
+    __syncthreads();
+    float invRadii0 = smem_temp_uint32_t[0];
+    __syncthreads();
+    
+    // ~~~~~~~~ desired_entropy  ~~~~~~~~
+    if (target_perplexity < 1.5f){
+        target_perplexity = 1.5f;
+    }
+    float perplexity_now = 0.0f; float PP_tol = 0.01f*target_perplexity;
+    if(PP_tol < 0.05){
+        PP_tol = 0.05;}
+    float R_entropy = __logf(target_perplexity + PP_tol);
+    float L_entropy = __logf(target_perplexity - PP_tol);
+    float desired_entropy = (R_entropy + L_entropy) / 2.0f;
+
+    // ~~~~~~~~ shared memory  ~~~~~~~~
+    float* smem_sqDists = &_smem_radiiP[obs_i_in_block * KHD];
+    float* temp_pijs    = &_smem_radiiP[(n_obs_in_block * KHD) + obs_i_in_block * KHD];
+    
+    float min_ivRad = 0.0f;
+    float max_ivRad = 99999999999.0f;
+    float ivRad     = invRadii0;
+
+    if(obs_i_global >= N-1 && k == 0){
+        printf("R_entropy : %f   L_entropy : %f\\n", R_entropy, L_entropy);
+        printf("k : %u   invRadii_HD[obs_i_global] : %f   dist to neigh: %f\\n", k, invRadii_HD[obs_i_global], sqdists_HD_write[obs_i_global * KHD + k]);
+    }
+
+    return;
+}
+
+__global__ void kernel_flag_all_newNeighs(uint32_t N, uint32_t* cuda_has_new_HD_neighs, uint32_t* cuda_has_new_HD_neighs_acc){
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i >= N){
+        return;}
+    cuda_has_new_HD_neighs[i]     = 1u;
+    cuda_has_new_HD_neighs_acc[i] = 1u;
+}
+
 __global__ void kernel_HD_redetermine_farthest_dists_and_sort(uint32_t N, uint32_t Mhd, uint32_t seed_shared, uint32_t* has_new_HD_neighs, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
@@ -843,7 +945,13 @@ __global__ void kernel_HD_redetermine_farthest_dists_and_sort(uint32_t N, uint32
     if(obs_i_global >= N){
         return;
     }
-    bool has_new_HD_neighs_obs_i = has_new_HD_neighs[obs_i_global];
+    extern __shared__ float smem_HD_distancesforfar[];
+    uint32_t* smem_temp_uint32_t = (uint32_t*) &smem_HD_distancesforfar[obs_i_in_block];
+    if(k == 0){
+        smem_temp_uint32_t[0] = has_new_HD_neighs[obs_i_global];
+    }
+    __syncthreads();
+    bool has_new_HD_neighs_obs_i = smem_temp_uint32_t[0] > 0u;
     uint32_t seed_here = seed_shared + obs_i_global;
     random_uint32_t_xorshift32(&seed_here);
     
@@ -853,7 +961,6 @@ __global__ void kernel_HD_redetermine_farthest_dists_and_sort(uint32_t N, uint32
     }
     
     // init shared memory
-    extern __shared__ float smem_HD_distancesforfar[];
     float*    smem_sqdists           = &smem_HD_distancesforfar[obs_i_in_block * KHD];
     uint32_t* smem_idxs_neighs       = (uint32_t*) &smem_HD_distancesforfar[n_obs_in_block * KHD + obs_i_in_block * KHD];
     smem_sqdists[k]     = sqdists_HD_write[obs_i_global * KHD + k];
@@ -884,7 +991,7 @@ __global__ void kernel_HD_redetermine_farthest_dists_and_sort(uint32_t N, uint32
     return;
 }
 
-__global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t* knn_LD_read, uint32_t seed_shared){
+__global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, uint32_t* has_new_HD_neighs_acc, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t* knn_LD_read, uint32_t seed_shared){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t cand_number    = threadIdx.x; 
@@ -942,21 +1049,30 @@ __global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_n
     uint32_t seed_local = seed_shared + obs_i_global + cand_number;
     random_uint32_t_xorshift32(&seed_local);
     // ------- find the index of the candidate: random index, a random neighbour of a random neighbour in LD or HD -------
-    const uint32_t lookat_rand_until     = 3u;
+    const uint32_t lookat_rand_until     = 2u;
     uint32_t cand = 0u;
     if(cand_number < lookat_rand_until){ // random index
         cand = random_uint32_t_xorshift32(&seed_local) % N;
     }
-    else{ // mean farD:  1243.384  diff_v_EMA:  -0.29     pct_new_HD_neighs:  0.355   i: 500 
+    else{ 
         uint32_t r1     = random_uint32_t_xorshift32(&seed_local) % 1024;
-        bool look_in_HD = (r1 < (1024 * 3 / 4));
+        bool look_in_HD = (r1 < ((1024 * 3) / 4));
         const bool biased_Ks          = true;
         const bool jump_between_HD_LD = true;
-        // const uint32_t maxDepth = 2u;     // mean farD:  1143.0645  diff_v_EMA:  -0.06     pct_new_HD_neighs:  0.093   i: 1000
-        const uint32_t maxDepth = 1u;  // mean farD:  1135.8517  diff_v_EMA:  -0.02     pct_new_HD_neighs:  0.052   i: 1000
-        uint32_t random_depth   = random_uint32_t_xorshift32(&seed_local) % 1024;
-        uint32_t depth_todo     = 1u + ((random_depth * maxDepth) / 1024);
-        uint32_t depth          = 0u;
+        uint32_t depth_todo = 1u;
+        uint32_t rqsd = random_uint32_t_xorshift32(&seed_local);
+        if((rqsd % 2) == 0){
+            depth_todo = 1u;
+        }
+        else{
+            rqsd = random_uint32_t_xorshift32(&seed_local);
+            if((rqsd % 100) < 75){
+                depth_todo = 2u;
+            }
+            else{
+                depth_todo = 3u;
+            }
+        }
         uint32_t first_j = 0u;
         if(look_in_HD){
             uint32_t rand_k = random_uint32_t_xorshift32(&seed_local) % KHD;
@@ -968,13 +1084,14 @@ __global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_n
         }
         uint32_t j_from = obs_i_global;
         uint32_t j_to   = first_j;
+        uint32_t depth  = 0u;
         while(depth < depth_todo){
             j_from = j_to;
             j_to   = 0u;
             uint32_t k_to = 0u;
             if(jump_between_HD_LD){
                 r1 = random_uint32_t_xorshift32(&seed_local) % 1024;
-                look_in_HD = (r1 < 512);
+                look_in_HD = (r1 < ((1024 * 4) / 5));
             }
             uint32_t  K    = (look_in_HD) ? KHD : KLD;
             uint32_t* knns = (look_in_HD) ? knn_HD_read : knn_LD_read;
@@ -1095,7 +1212,7 @@ __global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_n
         }
     }
     __syncthreads();
-    // 2. candidates and neigbours collision detection
+    // ~~~~~~~~~~~~  2. candidates and neigbours collision detection  ~~~~~~~~~~~~
     uint32_t self_cursor = cand_number;
     uint32_t self_j      = cand_idxs[cand_number];
     bool  self_is_winner = self_cursor < cand_R;
@@ -1103,24 +1220,15 @@ __global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_n
         __syncthreads();
         smem_reductionslocal[self_cursor] = 0u;
         uint32_t current_j = cand_idxs[current_cursor];
-        // 2.1. collision with other candidates
+        // ~~~~~~  2.1. collision with other candidates  ~~~~~~~
         if(self_is_winner && self_cursor != current_cursor){
-            if(self_j == current_j){
+            if(self_j == current_j && self_cursor < current_cursor){
+            //if(self_j == current_j){
                 smem_reductionslocal[self_cursor] = 1u;
             }
         }
-        /*
-        reduce1d_max_uint32_t(smem_reductionslocal, cand_R, self_cursor);
-        bool early_hit = smem_reductionslocal[0] > 0u;
-        if(early_hit && self_cursor == current_cursor){
-            smem_collisions[self_cursor] = 1u;
-        }
-        if(early_hit){
-            continue;
-        }
-        */
 
-        // 2.2. collision with neighbours
+        // ~~~~~~  2.2. collision with neighbours  ~~~~~~
         bool hit = false;
         for(uint32_t step = 0u; step < n_steps; step++){
             uint32_t idx = step * stride + cand_number;
@@ -1148,33 +1256,31 @@ __global__ void candidates_HD_generate(uint32_t N, uint32_t Mhd, uint32_t* has_n
         __syncthreads();
     }
     __syncthreads();
+
     
+    //  ~~~~~~  save the candidates that are retained to global memory  ~~~~~~
     smem_reductionslocal[cand_number] = 0u;
-    if( cand_number < cand_R){
+    if(cand_number < cand_R){
         if(!(smem_collisions[cand_number]>0u)){
             knn_HD_write[obs_i_global*KHD + cand_number]     = cand_idxs[cand_number];
             sqdists_HD_write[obs_i_global*KHD + cand_number] = cand_dists[cand_number];
-            smem_reductionslocal[cand_number] = 1u;
-
-            //if(obs_i_global == N-1u ){
-            //    printf("-");
-            //}
+            smem_reductionslocal[cand_number] = 1u; 
+            /*if(obs_i_global == N-1u){
+                printf("-");
+            }*/
         }
     }
-    /*
-    if(obs_i_global == N-1u ){
-        printf("\\n cand_R  %u\\n", cand_R);
-    }
-    */
-
-    // determine if the obs had a new neighbour
+    //  ~~~~~~ determine if the obs had a new neighbour  ~~~~~~
     reduce1d_max_uint32_t(smem_reductionslocal, cand_R, cand_number);
     if(cand_number == 0u ){
-        has_new_HD_neighs[obs_i_global] = smem_reductionslocal[0];
+        uint32_t reduction = smem_reductionslocal[0];
+        has_new_HD_neighs[obs_i_global] = reduction > 0u ? 1u : 0u;
+        if(reduction > 0u){
+            has_new_HD_neighs_acc[obs_i_global] = 1u;
+        }
     }
     return;
 }
-
 
 // block x : candidate number   block y : observation number
 __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read, uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write, uint32_t* knn_HD_read, uint32_t seed_shared){
@@ -1365,11 +1471,17 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     for(uint32_t working_cand_nb = 0u; working_cand_nb < cand_R; working_cand_nb++){
         __syncthreads();
         uint32_t working_j = cand_idxs[working_cand_nb];
+
+
+        
+
+
         // collision within candidates
         uint32_t collision_cand = 0u;
         if(cand_number < cand_R){
             if(working_cand_nb != cand_number){
-                if(cand == working_j){
+                if(cand == working_j && cand_number < working_cand_nb){
+                //if(cand == working_j){
                     collision_cand = 1u;
                 }
             }
