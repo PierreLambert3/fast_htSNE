@@ -11,6 +11,7 @@ all_the_cuda_code = """
 #define KLD (32u * 1u) 
 #define N_CAND_LD (32u)
 #define N_CAND_HD (32u)
+#define N_INTERACTIONS_FAR (32u)
 
 /*
 #define N_CAND_HD (8u) <--- il faut faire N_cand beaucoup plus faible? vu que cand_R devient < 4 tres rapidement
@@ -19,12 +20,13 @@ ca donne self.candidates_HD_generate_and_sort_euclidean_cu
 --> probablement le strided index: esssayer  avec indices directs
 */
 
-__global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kld, uint32_t* n_cand_ld, uint32_t* n_cand_hd){
+__global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kld, uint32_t* n_cand_ld, uint32_t* n_cand_hd, uint32_t* n_interactions_far){
     *max_perplexity = MAX_PERPLEXITY;
     *khd            = KHD;
     *kld            = KLD;
     *n_cand_ld      = N_CAND_LD;
     *n_cand_hd      = N_CAND_HD;
+    *n_interactions_far = N_INTERACTIONS_FAR;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -832,18 +834,229 @@ __global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uin
     }
 }
 
-// --------------------------------------------------------------------------------------------------
-// -------------------------------------  candidate neighbours  ------------------------------------------
-// --------------------------------------------------------------------------------------------------
-__global__ void update_HD_sim_and_local_state_euclidean(uint32_t N, uint32_t Mhd, uint32_t* has_new_HD_neighs, float* Xhd, uint32_t* knn_HD_write, float* sqdists_HD_write, float* invRadii_HD, float* Pasm, float* Pasym_sums, float* Psym, uint32_t* Psym_knn){
-    /*
-    IMPORTANT: need to use 2 P matrices and 2 kernels, else during the last step of symmetrization there is concurrency 
-    */
+__global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd, uint32_t Mld, float lr, float cauchy_alpha, uint32_t seed, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, float* X_mmtm, float* X_write, uint32_t* knn_HD, float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t khd            = threadIdx.x;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    if(obs_i_global >= N){
+        return;
+    }
+    bool is_main = (khd == 0);
+    uint32_t seed_obs  = seed + obs_i_global;
+    uint32_t seed_self = seed + N + obs_i_global*KHD + khd;
+    random_uint32_t_xorshift32(&seed_obs);
+    random_uint32_t_xorshift32(&seed_self);
+    extern __shared__ float _smem_GeneralGradients[];
+    
+    // ~~~~~~~~ shared mem init, load Xi, reset  gradients ~~~~~~~~
+    float* smem_sNoms_layer2  = (float*) &_smem_GeneralGradients[obs_i_in_block*(KLD + N_INTERACTIONS_FAR)];
+    float* Xi_ld              = (float*) &_smem_GeneralGradients[n_obs_in_block*(KLD + N_INTERACTIONS_FAR) + obs_i_in_block*Mld];
+    float* gradients_m        = (float*) &_smem_GeneralGradients[n_obs_in_block*(KLD + N_INTERACTIONS_FAR) + n_obs_in_block*Mld + obs_i_in_block*KHD];
+    if(Mld < KHD){
+        uint32_t m = khd;
+        if(m < Mld){
+            Xi_ld[m] = X_nest[obs_i_global * Mld + m];
+        }
+    }
+    else{ // slow: bad config. TODO: strided parallel accesses
+        if(is_main){  
+            for(uint32_t m = 0u; m < Mld; m++){ // very slow
+                Xi_ld[m] = X_nest[obs_i_global * Mld + m];
+            }
+        }
+    }
+    __syncthreads();
+
+    // ~~~~~~~~ type of interaction, j_1 and j_2 ~~~~~~~~
+    // |----------------j1--- K HD --------------------|  
+    // |--- K LD ---|---j2------- N FAR ---------|   
+    bool has_other = khd < (KLD + N_INTERACTIONS_FAR);
+    bool other_is_neigh = (has_other && khd < KLD);
+    uint32_t j_1 = knn_HD[obs_i_global * KHD + khd]; 
+    uint32_t j_2 = 0u;
+    if(has_other){
+        if(other_is_neigh){
+            j_2 = knn_LD[obs_i_global * KLD + khd]; // Kld = Khd
+        }
+        else{
+            j_2 = random_uint32_t_xorshift32(&seed_self) % N;
+        }
+    }
+    __syncthreads();
+
+
+    // ~~~~~~~~~~~~~~~~ 1. compute LD similarities for j1 and j2 ~~~~~~~~~~~~~~~~
+    float* Xj1 = NULL; float* Xj2 = NULL;
+    float wij1 = 0.0f; float qij1 = 0.0f;
+    float wij2 = 0.0f; float qij2 = 0.0f;
+    // ~~~~~~~~ 1.1    j1 (HD neighbour)   ~~~~~~~~
+    Xj1 = (float*) &X_nest[j_1 * Mld];
+    float sq_eucl1 = squared_euclidean_distance(Xi_ld, Xj1, Mld);
+    wij1 = 1.0f / __powf(1.0f + sq_eucl1/cauchy_alpha, cauchy_alpha);
+    qij1 = wij1 / denominatorLD;
+    // ~~~~~~~~ 1.2    j2  (LD neigh or rand sample)  ~~~~~~~~
+    if(has_other){
+        Xj2 = (float*) &X_nest[j_2 * Mld];
+        float sq_eucl2 = squared_euclidean_distance(Xi_ld, Xj2, Mld);
+        wij2 = 1.0f / __powf(1.0f + sq_eucl2/cauchy_alpha, cauchy_alpha);
+        qij2 = wij2 / denominatorLD;
+        smem_sNoms_layer2[khd] = wij2;
+
+    }
+
+
+    // ~~~~~~~~~~~~~~~~ 2. sum the wij2 & save results to global memory ~~~~~~~~~~~~~~~~
+    uint32_t idx_far = khd - KLD;
+    if(other_is_neigh){
+        idx_far = N_INTERACTIONS_FAR+1;
+    }
+    reduce1d_sum_float(&smem_sNoms_layer2[KLD], N_INTERACTIONS_FAR, idx_far); 
+    reduce1d_sum_float(smem_sNoms_layer2, KLD, khd); // separate reduction for rand points and neighs
+    if(is_main){
+        double sum_rands  = (double) smem_sNoms_layer2[KLD];
+        double sum_neighs = (double) smem_sNoms_layer2[0];
+        sumSnorms_rand[obs_i_global]   = sum_rands;  // slow
+        sumSnorms_neighs[obs_i_global] = sum_neighs; // slow
+    }
+    __syncthreads();
+    smem_sNoms_layer2 = NULL;
+
+    
+
+    // ~~~~~ stop after sum of LD similarities if warmup ~~~~~
+    if(do_gradients < 1){
+        return;
+    }
+
+    // ~~~~~~~~~~~~~~~~ 3. gradients ~~~~~~~~~~~~~~~~
+
+    
+
+    repuls_multiplier = 0.0f;
+
+
+
+
+    float grad_prefix_1 = 0.0f, grad_prefix_2 = 0.0f;
+    // ~~~~~~~~ 2.1 precompute i <--> j1/2 gradient prefix  ~~~~~~~~
+    float Pij1 = Psym[obs_i_global * KHD + khd];
+
+
+    //if((seed_self % 4000 ) == 0){
+   //     printf("Pij1: %e \\n", Pij1);
+    //}
+    lr = (float) N * 0.002f;
+
+    float _A_1 = 0.0f, _A_2 = 0.0f, _B_1 = 0.0f, _B_2 = 0.0f;
+    _A_1 = Pij1  - (qij1 * repuls_multiplier);
+    
+    
+    _A_1 = Pij1;  ok donc comme ca, sans le qij ca marche bien: le probleme vient de qij.
+     mtnt: isoler le probleme: quij denom ou qij nom?
+
+
+
+    _B_1 = __powf(wij1, 1.0f / cauchy_alpha);
+    grad_prefix_1 = _A_1 * _B_1;
+    if(has_other){
+        _A_2 = 0.0f - (qij2 * repuls_multiplier);
+        _B_2 = __powf(wij2, 1.0f / cauchy_alpha);
+        grad_prefix_2 = _A_2 * _B_2;
+    }
+
+
+    // ~~~~~~~~ 2.2 gradient for each LD dimension  ~~~~~~~~
+    float mmmtm_alpha = 0.9f;
+    for(uint32_t m = 0; m < Mld; m++){
+        __syncthreads();
+        float Xi_m  = Xi_ld[m];
+        float Xj1_m = Xj1[m];
+        float Xj2_m = 0.0f;
+        if(has_other){
+            Xj2_m = Xj2[m];
+        }
+        // ~~~~~~~~ j1 : HD neighbour ~~~~~~~~
+        float neg_grad1 = grad_prefix_1 * (Xj1_m - Xi_m);
+        float neg_grad2 = 0.0f;
+        if(has_other){
+            neg_grad2 = grad_prefix_2 * (Xj2_m - Xi_m);
+        }
+        float local_grad = neg_grad1 + neg_grad2;
+
+        
+        if(obs_i_global == 0 && is_main){
+            printf("grad_prefix_1: %f, grad_prefix_2: %f, neg_grad1: %f, neg_grad2: %f, local_grad: %f\\n", grad_prefix_1, grad_prefix_2, neg_grad1, neg_grad2, local_grad);
+        }
+
+        gradients_m[khd] = local_grad;
+        reduce1d_sum_float(gradients_m, KHD, khd);
+        if(is_main){
+            float update = lr * gradients_m[0];
+            float momentum_now = X_mmtm[obs_i_global * Mld + m];
+            float new_momentum = mmmtm_alpha * momentum_now + update;
+            float Xm_now = X_write[obs_i_global * Mld + m];
+            X_write[obs_i_global * Mld + m] = Xm_now + new_momentum;
+            X_mmtm[obs_i_global * Mld + m]  = new_momentum;
+        }
+    }
+    
+
+// |----------------j1--- K HD --------------------|  
+// |--- K LD ---|---j2------- N FAR ---------|  
+//                 OR
+// |--------------------- K HD -----------------j1-|  
+// |--- K LD ---|------------ N FAR ---------|  j2 
+
+
     return;
 }
 
-  
-__global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neighs_acc, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, float* invRadii_HD, float* Psym, uint32_t* P_knn, float* Pasym_sums, uint32_t seed){
+
+__global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* params, float* nest, float* momenta, float lr){
+    // here need a 2D grid: N x M_LD that way all the accesses are at once
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    uint32_t m              = threadIdx.x; 
+    if (obs_i_global >= N || m >= M) { return; }
+    float param    = params[obs_i_global * M + m];
+    float momentum = momenta[obs_i_global * M + m];
+    float nest_val = param + lr * momentum;
+    nest[obs_i_global * M + m] = nest_val;
+    return;
+}
+
+
+// --------------------------------------------------------------------------------------------------
+// -------------------------------------  candidate neighbours  ------------------------------------------
+// --------------------------------------------------------------------------------------------------
+__device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad, float* dists, float* Pi, float* arr_floats){
+    // ~~~~~~~ asym Pij given ivRad  ~~~~~~~
+    float Pnom    = __expf(-dists[k] * ivRad);    
+    arr_floats[k] = Pnom;
+    // ~~~~~~~ 1. compute sum of Pnoms  ~~~~~~~
+    reduce1d_sum_float(arr_floats, KHD, k);
+    float sumP = arr_floats[0];
+    if(sumP < 1e-12f){
+        sumP = 1e-12f;
+    }
+    // ~~~~~~~ 2. compute sum of (asym Pijs) x (dist)  ~~~~~~~
+    float Pij = Pi[k] / sumP;
+    Pi[k] = Pij;
+    arr_floats[k] = Pij * dists[k];
+    reduce1d_sum_float(arr_floats, KHD, k);
+    if(k == 0){
+        float sumPxD = arr_floats[0];
+        // ~~~~~~~ 3. compute entropy  ~~~~~~~
+        float entropy = __logf(sumP) + ivRad * sumPxD;
+        arr_floats[0] = entropy;
+    }
+    __syncthreads();
+}
+
+__global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neighs_acc, uint32_t* knn_HD_write, uint32_t* P_knn,\
+     float* sqdists_HD_write, float* invRadii_HD, float* Psym, float* Pasm, float* Pasym_sums){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t k              = threadIdx.x;
@@ -862,17 +1075,31 @@ __global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neigh
     if(smem_temp_uint32_t[0] < 1u){
         return;
     }
-    smem_temp_uint32_t[0] = 0u;
+    smem_temp_uint32_t = NULL;
+    // ~~~~~~~~ load 3 values from global mem  ~~~~~~~~
+    uint32_t j   = knn_HD_write[obs_i_global * KHD + k];
+    float sq_dij = sqdists_HD_write[obs_i_global * KHD + k];
+    float p_ij   = Pasm[obs_i_global * KHD + k];
+    float invRad_j   = invRadii_HD[j];
+    // ~~~~~~~~ fetch Pasym_sum using shared memory  ~~~~~~~~
+    float* smem_temp_float = (float*) &_2smem_radiiP[obs_i_in_block];
+    if(is_main){ smem_temp_float[0] = Pasym_sums[obs_i_global];}
     __syncthreads();
-    return;
+    float Pasm_i_sum = smem_temp_float[0];
+    float Pasm_j_sum = Pasym_sums[j];
+    Pasm_j_sum = fmaxf(Pasm_j_sum, 1e-12f);
+    Pasm_i_sum = fmaxf(Pasm_i_sum, 1e-12f);
+    // ~~~~~~~~  symmetrized Pij  ~~~~~~~~
+    float Pij = p_ij / Pasm_i_sum;
+    float Pji = __expf(-sq_dij * invRad_j) / Pasm_j_sum;
+    Pji = fminf(Pji, 1.0f); // no guarantee that Pji is < 1.0 if not mutual neighbours
+    // ~~~~~~~~ save to global  ~~~~~~~~
+    Psym[obs_i_global * KHD + k]  = (Pij + Pji) / (2.0f * (float)N);
+    P_knn[obs_i_global * KHD + k] = j;
 }
 
-__device__ __forceinline__ float entropy_given_ivRad(float ivRad, float* sqDists, float* temp_pijs){
-    return;
-}
-
-__global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32_t* cuda_has_new_HD_neighs_acc, uint32_t* knn_HD_write, float* sqdists_HD_write,\
-                                 float* farthest_dist_HD_write, float* invRadii_HD, float* Pasm, uint32_t* P_knn, float* Pasym_sums, uint32_t seed){
+__global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32_t* cuda_has_new_HD_neighs_acc, float* sqdists_HD_write,\
+                                float* invRadii_HD, float* Pasm, float* Pasym_sums, uint32_t seed){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t k              = threadIdx.x;
@@ -882,6 +1109,8 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     }
     bool is_main = (k == 0);
     extern __shared__ float _smem_radiiP[];
+    uint32_t seed_obs_i = seed + obs_i_global;
+    random_uint32_t_xorshift32(&seed_obs_i);
 
     // ~~~~~~~~ check if the observation has new HD neighbours  ~~~~~~~~
     uint32_t* smem_temp_uint32_t = (uint32_t*) &_smem_radiiP[obs_i_in_block];
@@ -895,11 +1124,12 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     __syncthreads();
 
     // ~~~~~~~~ load init invRadii  ~~~~~~~~
+    float* smem_temp_float = (float*) &_smem_radiiP[obs_i_in_block];
     if(is_main){
-        smem_temp_uint32_t[0] = invRadii_HD[obs_i_global];
+        smem_temp_float[0] = invRadii_HD[obs_i_global];
     }
     __syncthreads();
-    float invRadii0 = smem_temp_uint32_t[0];
+    float invRadii0 = smem_temp_float[0];
     __syncthreads();
     
     // ~~~~~~~~ desired_entropy  ~~~~~~~~
@@ -909,23 +1139,119 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     float perplexity_now = 0.0f; float PP_tol = 0.01f*target_perplexity;
     if(PP_tol < 0.05){
         PP_tol = 0.05;}
-    float R_entropy = __logf(target_perplexity + PP_tol);
-    float L_entropy = __logf(target_perplexity - PP_tol);
-    float desired_entropy = (R_entropy + L_entropy) / 2.0f;
+    float max_entropy = __logf(target_perplexity + PP_tol);
+    float min_entropy = __logf(target_perplexity - PP_tol);
+    float desired_entropy = (max_entropy + min_entropy) / 2.0f;
 
     // ~~~~~~~~ shared memory  ~~~~~~~~
-    float* smem_sqDists = &_smem_radiiP[obs_i_in_block * KHD];
-    float* temp_pijs    = &_smem_radiiP[(n_obs_in_block * KHD) + obs_i_in_block * KHD];
-    
-    float min_ivRad = 0.0f;
-    float max_ivRad = 99999999999.0f;
-    float ivRad     = invRadii0;
+    float* smem_sqDists = &_smem_radiiP[(n_obs_in_block * KHD)*0 + obs_i_in_block * KHD];
+    float* temp_pijs    = &_smem_radiiP[(n_obs_in_block * KHD)*1 + obs_i_in_block * KHD];
+    float* temp_floats  = &_smem_radiiP[(n_obs_in_block * KHD)*2 + obs_i_in_block * KHD];
+    smem_sqDists[k]     = sqdists_HD_write[obs_i_global * KHD + k];
+    temp_pijs[k]        = 0.0f;
+    __syncthreads();
 
-    if(obs_i_global >= N-1 && k == 0){
-        printf("R_entropy : %f   L_entropy : %f\\n", R_entropy, L_entropy);
-        printf("k : %u   invRadii_HD[obs_i_global] : %f   dist to neigh: %f\\n", k, invRadii_HD[obs_i_global], sqdists_HD_write[obs_i_global * KHD + k]);
+    // ~~~~~~~~ binary search params  ~~~~~~~~
+    float ivRad   = invRadii0;
+    float L_ivRad = 0.0f;           // will be initialized if needed
+    float R_ivRad = 99999999999.0f; // will be initialized if needed
+    
+    // ~~~~~~~~ entropy now: decrease, stay, or grow?  ~~~~~~~~
+    set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
+    float entropy = temp_floats[0];
+    __syncthreads();
+    bool stay = entropy > min_entropy && entropy < max_entropy;
+    float direction = desired_entropy - entropy;
+    bool grow = !stay && direction < 0.0f;
+    // ~~~~~~~~ binary search: L & R initialisation  ~~~~~~~~
+    if( stay ){
+        ;
+    }
+    else{
+        // ~~~~~~~~ find the undefined bound by growing in one direction  ~~~~~~~~
+        uint32_t iter_stretch = 0;
+        float multiplier = grow ? 1.1f : 0.9f;
+        bool H_ok = entropy > min_entropy && entropy < max_entropy;
+        bool direction_changed = false;
+        bool iter_limit_reached = false;
+        while(!direction_changed && !H_ok && !iter_limit_reached){
+            iter_stretch++;
+            if(grow){
+                L_ivRad = ivRad;
+                R_ivRad = ivRad * multiplier;
+                ivRad   = L_ivRad + 0.6f * (R_ivRad - L_ivRad);
+                multiplier = multiplier * multiplier;
+            }
+            else{
+                L_ivRad = ivRad * multiplier;
+                R_ivRad = ivRad;
+                ivRad   = L_ivRad + 0.4f * (R_ivRad - L_ivRad);
+                multiplier = multiplier * multiplier;
+            }
+            if(L_ivRad < 1e-12f){
+                L_ivRad = 1e-12f;
+                ivRad = L_ivRad + 0.5f * (R_ivRad - L_ivRad);
+                
+            }
+            set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
+            entropy = temp_floats[0];
+            __syncthreads();
+            H_ok = entropy > min_entropy && entropy < max_entropy;
+            float directionnow = desired_entropy - entropy;
+            bool grownow = !H_ok && directionnow < 0.0f;
+            direction_changed = grownow != grow;
+            iter_limit_reached = iter_stretch >= 10;
+        }
+        // ~~~~~~~~  binary search using the bounds  ~~~~~~~~
+        if(direction_changed && (!H_ok && !iter_limit_reached)){
+            uint32_t iter_binSearch = 0;
+            while(!H_ok && iter_binSearch < 100){
+                iter_binSearch++;
+                direction = desired_entropy - entropy;
+                grow = direction < 0.0f;
+                if(grow){
+                    L_ivRad = ivRad;
+                    ivRad   = L_ivRad + 0.5f * (R_ivRad - L_ivRad);
+                }
+                else{
+                    R_ivRad = ivRad;
+                    ivRad   = L_ivRad + 0.5f * (R_ivRad - L_ivRad);
+                }
+                set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
+                entropy = temp_floats[0];
+                __syncthreads();
+                H_ok = entropy > min_entropy && entropy < max_entropy;
+            }
+        }
+        // save the ivRad
+        __syncthreads();
+        if(is_main){
+            invRadii_HD[obs_i_global] = ivRad;
+        }
+    }
+    __syncthreads();
+
+    // ~~~~~~~~  compute Pasym & sumPasm for obs i   ~~~~~~~~	
+    float eucl_sq = smem_sqDists[k];
+    float p_asm   = __expf(-eucl_sq * ivRad);
+    temp_floats[k] = p_asm;
+    reduce1d_sum_float(temp_floats, KHD, k);
+    float sumPasm = temp_floats[0];
+    
+    // ~~~~~~~~  save Pasym & sumPasm for obs i   ~~~~~~~~
+    Pasm[obs_i_global * KHD + k] = p_asm;
+    if(is_main){
+        Pasym_sums[obs_i_global] = sumPasm;
     }
 
+    /*
+    set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
+    entropy = temp_floats[0];
+    if(is_main && (seed_obs_i % 10000) == 0){
+        float perplexity_now = __expf(entropy);
+        printf("perplexity  %f\\n", perplexity_now);
+    }
+    */
     return;
 }
 
@@ -1527,7 +1853,7 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
 // -------------------------------------  neighbour dists  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
 __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read, uint32_t* knn_LD_read,  uint32_t* knn_LD_write, float* sqdists_LD_write, float* farthest_dist_LD_write,\
-     float* simiNominators_LD_write, double* lvl1_sumsSimiNominators_LD_write, float cauchy_alpha, uint32_t seed){
+     uint32_t seed){
     extern __shared__ float smem_LD_sqdists[];
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t obs_i_in_block = threadIdx.y;
@@ -1554,7 +1880,7 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
             X_i[k]     = Xi_m;
         }
     }
-    else{  // A loop to access global memory, blocking all other threads. Absolutely disgusting.
+    else{  // A loop to access global memory, blocking all other threads. very bad
         if(is_0_thread){
             float* Xi_globalmem = &Xld_read[obs_i_global * Mld]; // <--------- SLOW (global memory read)
             for(uint32_t m = 0; m < Mld; m++){
@@ -1590,7 +1916,8 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
     if(is_0_thread){ // k=0 contains the furthest dist after  reduction
         farthest_dist_LD_write[obs_i_global] = sq_eucl;
     }
-
+    
+    /*
     // --------  compute the similarity in LD and save it --------
     float* smems_snoms       = (float*) &smem_LD_sqdists[obs_i_in_block*KLD];
     // TODO  : further optimisation: since we divide by bigDenom, remove the 1/... from the nominator and modify bigDenom accordingly
@@ -1606,9 +1933,11 @@ __global__ void compute_all_LD_sqdists(uint32_t N, uint32_t Mld, float* Xld_read
     
     // --------  write the partial sum of nominators to global memory  --------
     __syncthreads();
+    forgot to write the nominators to global memory
     if(is_0_thread){
         lvl1_sumsSimiNominators_LD_write[obs_i_global] = (double) smems_snoms[0];
     }
+    */
     return;
 }
 
