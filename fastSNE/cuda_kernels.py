@@ -834,7 +834,7 @@ __global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uin
     }
 }
 
-__global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd, uint32_t Mld, float lr, float cauchy_alpha, uint32_t seed, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, float* X_mmtm, float* X_write, uint32_t* knn_HD, float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
+__global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd, uint32_t Mld, float lr, float cauchy_alpha, uint32_t seed, float* grad_acc_global, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, uint32_t* knn_HD, float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t khd            = threadIdx.x;
@@ -844,15 +844,15 @@ __global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd
     }
     bool is_main = (khd == 0);
     uint32_t seed_obs  = seed + obs_i_global;
-    uint32_t seed_self = seed + N + obs_i_global*KHD + khd;
     random_uint32_t_xorshift32(&seed_obs);
+    uint32_t seed_self = seed_obs + obs_i_global*KHD + khd;
     random_uint32_t_xorshift32(&seed_self);
     extern __shared__ float _smem_GeneralGradients[];
     
     // ~~~~~~~~ shared mem init, load Xi, reset  gradients ~~~~~~~~
-    float* smem_sNoms_layer2  = (float*) &_smem_GeneralGradients[obs_i_in_block*(KLD + N_INTERACTIONS_FAR)];
-    float* Xi_ld              = (float*) &_smem_GeneralGradients[n_obs_in_block*(KLD + N_INTERACTIONS_FAR) + obs_i_in_block*Mld];
-    float* gradients_m        = (float*) &_smem_GeneralGradients[n_obs_in_block*(KLD + N_INTERACTIONS_FAR) + n_obs_in_block*Mld + obs_i_in_block*KHD];
+    float* Xi_ld =  (float*) &_smem_GeneralGradients[obs_i_in_block*Mld];
+    uint32_t idx0 = n_obs_in_block*Mld;
+    
     if(Mld < KHD){
         uint32_t m = khd;
         if(m < Mld){
@@ -885,122 +885,114 @@ __global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd
     }
     __syncthreads();
 
-
     // ~~~~~~~~~~~~~~~~ 1. compute LD similarities for j1 and j2 ~~~~~~~~~~~~~~~~
     float* Xj1 = NULL; float* Xj2 = NULL;
     float wij1 = 0.0f; float qij1 = 0.0f;
     float wij2 = 0.0f; float qij2 = 0.0f;
+
     // ~~~~~~~~ 1.1    j1 (HD neighbour)   ~~~~~~~~
-    Xj1 = (float*) &X_nest[j_1 * Mld];
+    Xj1 = &X_nest[j_1 * Mld];
     float sq_eucl1 = squared_euclidean_distance(Xi_ld, Xj1, Mld);
     wij1 = 1.0f / __powf(1.0f + sq_eucl1/cauchy_alpha, cauchy_alpha);
     qij1 = wij1 / denominatorLD;
+    
     // ~~~~~~~~ 1.2    j2  (LD neigh or rand sample)  ~~~~~~~~
+    float* smem_KLD_then_FAR = (float*) &_smem_GeneralGradients[idx0 + obs_i_in_block*(KLD + N_INTERACTIONS_FAR)];
+    idx0 += n_obs_in_block*(KLD + N_INTERACTIONS_FAR);
     if(has_other){
-        Xj2 = (float*) &X_nest[j_2 * Mld];
+        Xj2 = &X_nest[j_2 * Mld];
         float sq_eucl2 = squared_euclidean_distance(Xi_ld, Xj2, Mld);
         wij2 = 1.0f / __powf(1.0f + sq_eucl2/cauchy_alpha, cauchy_alpha);
         qij2 = wij2 / denominatorLD;
-        smem_sNoms_layer2[khd] = wij2;
-
+        smem_KLD_then_FAR[khd] = wij2;
     }
-
-
+    
     // ~~~~~~~~~~~~~~~~ 2. sum the wij2 & save results to global memory ~~~~~~~~~~~~~~~~
-    uint32_t idx_far = khd - KLD;
-    if(other_is_neigh){
-        idx_far = N_INTERACTIONS_FAR+1;
+    uint32_t idx_far = khd;
+    if(has_other){
+        if(other_is_neigh){
+            idx_far = N_INTERACTIONS_FAR+khd;
+        }
+        else{
+            idx_far = khd - N_INTERACTIONS_FAR;
+        }
     }
-    reduce1d_sum_float(&smem_sNoms_layer2[KLD], N_INTERACTIONS_FAR, idx_far); 
-    reduce1d_sum_float(smem_sNoms_layer2, KLD, khd); // separate reduction for rand points and neighs
+
+    reduce1d_sum_float(&smem_KLD_then_FAR[KLD], N_INTERACTIONS_FAR, idx_far); 
+    reduce1d_sum_float(smem_KLD_then_FAR, KLD, khd);
     if(is_main){
-        double sum_rands  = (double) smem_sNoms_layer2[KLD];
-        double sum_neighs = (double) smem_sNoms_layer2[0];
+        double sum_rands  = (double) smem_KLD_then_FAR[KLD];  // verified
+        double sum_neighs = (double) smem_KLD_then_FAR[0];    // verified
         sumSnorms_rand[obs_i_global]   = sum_rands;  // slow
         sumSnorms_neighs[obs_i_global] = sum_neighs; // slow
     }
     __syncthreads();
-    smem_sNoms_layer2 = NULL;
-
-    
-
     // ~~~~~ stop after sum of LD similarities if warmup ~~~~~
     if(do_gradients < 1){
         return;
     }
 
     // ~~~~~~~~~~~~~~~~ 3. gradients ~~~~~~~~~~~~~~~~
-
-    
-
-    repuls_multiplier = 0.0f;
-
-
-
-
-    float grad_prefix_1 = 0.0f, grad_prefix_2 = 0.0f;
-    // ~~~~~~~~ 2.1 precompute i <--> j1/2 gradient prefix  ~~~~~~~~
+    float* gradients_khds = (float*) &_smem_GeneralGradients[idx0 + obs_i_in_block*KHD];
+    gradients_khds[khd] = 0.0f;
+    idx0 += n_obs_in_block*KHD;
     float Pij1 = Psym[obs_i_global * KHD + khd];
-
-
-    //if((seed_self % 4000 ) == 0){
-   //     printf("Pij1: %e \\n", Pij1);
-    //}
-    lr = (float) N * 0.002f;
-
     float _A_1 = 0.0f, _A_2 = 0.0f, _B_1 = 0.0f, _B_2 = 0.0f;
+    float grad_prefix_1 = 0.0f, grad_prefix_2 = 0.0f;
+    if(Pij1 > 1.0f || Pij1 < 0.0f || qij1 < 0.0f || qij1 > 1.0f ||qij2 < 0.0f || qij2 > 1.0f || wij1 < 0.0f || wij2 < 0.0f || wij1 > 1.0f || wij2 > 1.0f){
+        printf("\\n\\n\\n\\n------------------------------------\\n\\n--------  ERROR Pij1: %e  ---------\\n\\n\\n\\n", Pij1);
+    }
+    // ~~~~~~~~ 2.1 precompute i <--> j1/2 gradient prefix  ~~~~~~~~
+
+    // repuls_multiplier = 20.0f * 0.35f;
+    // repuls_multiplier *= 20.0f / 0.35f;
+
+perplexité???
     _A_1 = Pij1  - (qij1 * repuls_multiplier);
-    
-    
-    _A_1 = Pij1;  ok donc comme ca, sans le qij ca marche bien: le probleme vient de qij.
-     mtnt: isoler le probleme: quij denom ou qij nom?
-
-
-
-    _B_1 = __powf(wij1, 1.0f / cauchy_alpha);
+    _B_1 = powf(wij1,__frcp_rn(cauchy_alpha));
     grad_prefix_1 = _A_1 * _B_1;
     if(has_other){
         _A_2 = 0.0f - (qij2 * repuls_multiplier);
-        _B_2 = __powf(wij2, 1.0f / cauchy_alpha);
+        _B_2 = powf(wij2, __frcp_rn(cauchy_alpha));
         grad_prefix_2 = _A_2 * _B_2;
+        if(!other_is_neigh){
+            float scaling_factor = 0.5f * (float) (N-1u) / (float) N_INTERACTIONS_FAR;
+            grad_prefix_2 *= scaling_factor;
+            problem was here
+        }
     }
 
-
-    // ~~~~~~~~ 2.2 gradient for each LD dimension  ~~~~~~~~
-    float mmmtm_alpha = 0.9f;
     for(uint32_t m = 0; m < Mld; m++){
         __syncthreads();
-        float Xi_m  = Xi_ld[m];
-        float Xj1_m = Xj1[m];
-        float Xj2_m = 0.0f;
+        
+        // compute gradient for each j1 (and j2), for m-th dimension
+        float xi_m  = Xi_ld[m];
+        float xj1_m = Xj1[m];
+        float grad1 = grad_prefix_1 * (xi_m - xj1_m);
+        float grad2 = 0.0f;
         if(has_other){
-            Xj2_m = Xj2[m];
+            float xj2_m = Xj2[m];
+            grad2 = grad_prefix_2 * (xi_m - xj2_m);
         }
-        // ~~~~~~~~ j1 : HD neighbour ~~~~~~~~
-        float neg_grad1 = grad_prefix_1 * (Xj1_m - Xi_m);
-        float neg_grad2 = 0.0f;
-        if(has_other){
-            neg_grad2 = grad_prefix_2 * (Xj2_m - Xi_m);
-        }
-        float local_grad = neg_grad1 + neg_grad2;
+        
+
+        // perplexity change: no effect. find why, could be the reason
 
         
-        if(obs_i_global == 0 && is_main){
-            printf("grad_prefix_1: %f, grad_prefix_2: %f, neg_grad1: %f, neg_grad2: %f, local_grad: %f\\n", grad_prefix_1, grad_prefix_2, neg_grad1, neg_grad2, local_grad);
+        // update other's grad_acc and khd grad_acc (more or less non-conflicting accesses)
+        atomicAdd(&grad_acc_global[j_1 * Mld + m], grad1);
+        if(has_other){
+            atomicAdd(&grad_acc_global[j_2 * Mld + m], grad2); // needs to be of opposite sign to the one in is_main
         }
-
-        gradients_m[khd] = local_grad;
-        reduce1d_sum_float(gradients_m, KHD, khd);
+        // sum the gradients along the KHD dimension to collapse KLD on each i
+        gradients_khds[khd] = grad1 + grad2;
+        reduce1d_sum_float(gradients_khds, KHD, khd);
         if(is_main){
-            float update = lr * gradients_m[0];
-            float momentum_now = X_mmtm[obs_i_global * Mld + m];
-            float new_momentum = mmmtm_alpha * momentum_now + update;
-            float Xm_now = X_write[obs_i_global * Mld + m];
-            X_write[obs_i_global * Mld + m] = Xm_now + new_momentum;
-            X_mmtm[obs_i_global * Mld + m]  = new_momentum;
+            atomicAdd(&grad_acc_global[obs_i_global * Mld + m], -gradients_khds[0]);
         }
+        __syncthreads();
     }
-    
+
 
 // |----------------j1--- K HD --------------------|  
 // |--- K LD ---|---j2------- N FAR ---------|  
@@ -1012,8 +1004,26 @@ __global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd
     return;
 }
 
+__global__ void receive_gradients(uint32_t N, uint32_t M, float* grad_acc_global, float* write_Xld, float* Xld_mmtm, float lr){
+    uint32_t obs_i_in_block = threadIdx.y;
+    uint32_t n_obs_in_block = blockDim.y;
+    uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
+    uint32_t m              = threadIdx.x;
+    if(obs_i_global >= N || m >= M) { return; }
+    float grad_m     = -grad_acc_global[obs_i_global * M + m];
+    float xi_m       = write_Xld[obs_i_global * M + m];
+    float mmtm_m     = Xld_mmtm[obs_i_global * M + m];
 
-__global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* params, float* nest, float* momenta, float lr){
+    // update momentum
+    float new_mmtm_m = mmtm_m * 0.9f - grad_m;
+    Xld_mmtm[obs_i_global * M + m] = new_mmtm_m;
+    // update position
+    float new_xi_m = xi_m + lr * new_mmtm_m;
+    write_Xld[obs_i_global * M + m] = new_xi_m;
+    return;
+}
+
+__global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* grad_acc_global, float* params, float* nest, float* momenta, float lr){
     // here need a 2D grid: N x M_LD that way all the accesses are at once
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
@@ -1022,8 +1032,13 @@ __global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* params, flo
     if (obs_i_global >= N || m >= M) { return; }
     float param    = params[obs_i_global * M + m];
     float momentum = momenta[obs_i_global * M + m];
-    float nest_val = param + lr * momentum;
-    nest[obs_i_global * M + m] = nest_val;
+
+
+    nest[obs_i_global * M + m] = param + lr * momentum;
+    // nest[obs_i_global * M + m] = param;
+
+    // reset grad_acc_global
+    grad_acc_global[obs_i_global * M + m] = 0.0f;
     return;
 }
 
@@ -1200,12 +1215,12 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
             float directionnow = desired_entropy - entropy;
             bool grownow = !H_ok && directionnow < 0.0f;
             direction_changed = grownow != grow;
-            iter_limit_reached = iter_stretch >= 10;
+            iter_limit_reached = iter_stretch >= 100;
         }
         // ~~~~~~~~  binary search using the bounds  ~~~~~~~~
         if(direction_changed && (!H_ok && !iter_limit_reached)){
             uint32_t iter_binSearch = 0;
-            while(!H_ok && iter_binSearch < 100){
+            while(!H_ok && iter_binSearch < 500){
                 iter_binSearch++;
                 direction = desired_entropy - entropy;
                 grow = direction < 0.0f;
@@ -2094,7 +2109,7 @@ __global__ void kernel_update_EMA_LD(float* mins_EMA, float* maxs_EMA, float* mi
     uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
     uint32_t m              = threadIdx.x; 
     if (obs_i_global > 0 || m >= M) { return; }
-    float momentum = 0.99f;
+    float momentum = 0.9f;
     float min_val = mins[m];
     float max_val = maxs[m];
     float min_EMA = mins_EMA[m];
@@ -2116,8 +2131,13 @@ __global__ void kernel_scale_X(float* X_in, float* X_out, float min_val, float m
     // scale the data: (-0.75 to 0.75)  and shift the data (y min = -1.0)
     float value   = X_in[obs_i_global*M + m];
     float scaled  = (value - min_val) / (max_val - min_val);
-    scaled = ((scaled - 0.5f) * 2.0f) / 0.75f;
-    X_out[obs_i_global*M + m] = scaled * 0.45;
+    scaled = ((scaled - 0.5f) * 2.0f) * 0.75f;
+
+
+    // X_out[obs_i_global*M + m] = scaled ;
+    X_out[obs_i_global*M + m] = X_in[obs_i_global*M + m];
+
+
     return;
 }
 

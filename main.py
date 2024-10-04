@@ -5,11 +5,11 @@ import matplotlib.pyplot as plt
 #include both modules
 import fastSNE.fastSNE as fastSNE
 
-
-
-
+# set the random seed
+# np.random.seed(42)
 
 def fetch_dataset():
+
     # binary dump from a C flattened array of floats (32bits)
     mnist_binaries_path = r"C:\Users\pierr\dev\datasets\bin\mnist"
     mnist_X_filename = mnist_binaries_path + r"\MNIST_PCA_X.bin"
@@ -21,8 +21,18 @@ def fetch_dataset():
     X = np.fromfile(mnist_X_filename, dtype=np.float32).reshape(N, M)
     Y = np.fromfile(mnist_Y_filename, dtype=np.float32).reshape(N, 1)
 
+
+    N_sampled = 24000
+    perms = np.random.permutation(N)
+    X = X[perms[:N_sampled], :]
+    Y = Y[perms[:N_sampled], :]
+    N = N_sampled 
+    return N, M, X, Y.astype(np.int32)
+
+
+
     # allocate new dataset
-    n_times_larger = 7
+    n_times_larger = 1
     N_new = N * n_times_larger
     X_new = np.zeros((N_new, M), dtype=np.float32)
     Y_new = np.zeros((N_new, 1), dtype=np.float32)

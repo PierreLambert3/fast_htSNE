@@ -448,6 +448,9 @@ class fastSNE:
         self.linear_projection_now    = generate_orthogonal_matrix(self.Mhd, self.Mld)
         self.linear_projection_target = generate_orthogonal_matrix(self.Mhd, self.Mld)
         self.cpu_Xld = np.dot(Xhd, self.linear_projection_now).astype(np.float32) * 1e-4
+
+        self.cpu_Xld = np.random.randn(N, self.Mld).astype(np.float32) * 1e-4
+
         # determine grid shapes, block shapes, smem size for each CUDA kernels & compile kernels
         self.configue_and_initialise_CUDA_kernels(__Khd__, __Kld__, self.Mhd, self.Mld, device_number=__DEVICE_NUMBER__)
         
@@ -472,6 +475,7 @@ class fastSNE:
         self.compiled_cuda_code.get_function("kernel_floatMinReduction_one_step")
         self.kernel_flag_all_newNeighs = self.compiled_cuda_code.get_function("kernel_flag_all_newNeighs")
         self.kernel_gradients = self.compiled_cuda_code.get_function("kernel_gradients")
+        self.receive_gradients = self.compiled_cuda_code.get_function("receive_gradients")
         self.kernel_make_Xnesterov = self.compiled_cuda_code.get_function("kernel_make_Xnesterov")
         # cuda streams
         stream_minMax   = cuda.Stream() # used in GUI mode
@@ -506,6 +510,8 @@ class fastSNE:
         cuda_sqdists_HD_B       = gpuarray.to_gpu(np.zeros((N, __Khd__), dtype=np.float32)) 
         cuda_farthest_dist_HD_A = gpuarray.to_gpu(np.ones(N, dtype=np.float32))             
         cuda_farthest_dist_HD_B = gpuarray.to_gpu(np.ones(N, dtype=np.float32))            
+
+        grad_acc_global = gpuarray.to_gpu(np.zeros((N, self.Mld), dtype=np.float32)) # accumulate gradients
 
         # things for HD similarities: ind. radii, Pasm, Psym, sumsPasym
         cuda_has_new_HD_neighs = gpuarray.to_gpu(np.ones(N, dtype=np.uint32)) # todo: make this a bool* or uint8_t*
@@ -559,6 +565,7 @@ class fastSNE:
             "cuda_Pasm_sums"          : cuda_Pasm_sums,
             "cuda_Psym"               : cuda_Psym,
             "cuda_Psym_knn"           : cuda_Psym_knn,
+            "grad_acc_global"         : grad_acc_global,
             "all_streams"             : all_streams
         }
         self.periodic_1000 = 0
@@ -585,6 +592,7 @@ class fastSNE:
         cuda_knn_LD_B, cuda_sqdists_LD_B, cuda_farthest_dist_LD_B = [big_dic[key] for key in ["cuda_knn_LD_B", "cuda_sqdists_LD_B", "cuda_farthest_dist_LD_B"]]
         cuda_has_new_HD_neighs, cuda_invRadii_HD, cuda_Pasm, cuda_Pasm_sums, cuda_Psym, cuda_Psym_knn, cuda_has_new_HD_neighs_acc = [big_dic[key] for key in ["cuda_has_new_HD_neighs", "cuda_invRadii_HD", "cuda_Pasm", "cuda_Pasm_sums", "cuda_Psym", "cuda_Psym_knn", "cuda_has_new_HD_neighs"]]
         all_streams = big_dic["all_streams"]
+        grad_acc_global = big_dic["grad_acc_global"]
         neighbours_sumSnorms_LD = big_dic["neighbours_sumSnorms_LD"]
         randoms_sumSnorms_LD   = big_dic["randoms_sumSnorms_LD"]
         stream_minMax, stream_neigh_HD , stream_neigh_LD, stream_grads = all_streams
@@ -657,8 +665,7 @@ class fastSNE:
 
         denominator_simi_LD     = np.float32(self.N * __Kld__ * 0.2)
         sums_neighs_multiplier  = 1.0 
-        sums_rands_multiplier  = (self.N*self.N - self.N*(__Kld__+1)) / (self.N * __N_INTERACTIONS_FAR__)
-        # sums_rands_multiplier   = 1.0 #   <---- TRY THIS: since we dont sample all LD interations, why scale with NxN?
+        sums_rands_multiplier   = (self.N*self.N - self.N*(__Kld__+1)) / (self.N * __N_INTERACTIONS_FAR__)
 
         # 4.   Optimise until the GUI is closed
         iteration_int         = 0
@@ -671,7 +678,7 @@ class fastSNE:
         import time
         tic = time.time()
         pct_new_HD_neighs = 1.0
-        warmup_len = 230
+        warmup_len = 120
         while not gui_was_closed:
             # ~~~~~~ pointers depending on phase ~~~~~~
             if isPhaseA:
@@ -719,9 +726,11 @@ class fastSNE:
             stream_minMax.synchronize()
             stream_grads.synchronize()
             # ~~~~~~  perhaps recompute P  ~~~~~~ 
-            update_Psym_this_iteration = (not warmup) and (iteration_int % 11 == 0)
-            if iteration_int < 9:
+            update_Psym_this_iteration = False
+            if warmup and iteration_int >= warmup_len-3:
                 self.flag_new_HD_neighs(cuda_has_new_HD_neighs, cuda_has_new_HD_neighs_acc, stream_neigh_HD)
+                update_Psym_this_iteration = True
+            if (iteration_int % 11) == 0:
                 update_Psym_this_iteration = True
             if update_Psym_this_iteration: # requires stream_neigh_HD and stream_grads to be synced
                 self.high_dim_filtered_updateHDstates_and_Psym(cuda_Xhd, knn_HD_read, sqdists_HD_read, farthest_dist_HD_read, cuda_has_new_HD_neighs_acc, cuda_invRadii_HD, cuda_Pasm, cuda_Pasm_sums, cuda_Psym, cuda_Psym_knn, stream_neigh_HD)
@@ -740,16 +749,24 @@ class fastSNE:
             # ~~~~~~ get the sums on gpu of for LD simi denominator ~~~~~~
             random_sum = randoms_sumSnorms_LD.get()
             neighs_sum = neighbours_sumSnorms_LD.get()
-            now_denominator_simi_LD = np.float32(sums_rands_multiplier*random_sum + sums_neighs_multiplier*neighs_sum)
-            denominator_simi_LD = now_denominator_simi_LD
-            if denominator_simi_LD < 1e-10:
-                denominator_simi_LD = 1e-10
-            print(denominator_simi_LD, "  <---   denominator_simi_LD   random_sum: ", random_sum, "  neighs_sum: ", neighs_sum)
+            n_samples_estim = self.N * (__Khd__ + __Khd__ + __N_INTERACTIONS_FAR__)
+            matrix_area = self.N * (self.N - 1)
+            scaling_factor = matrix_area / n_samples_estim
+            denominator_simi_LD = np.float32(scaling_factor * (random_sum + neighs_sum))
+            # acc1 = (random_sum+neighs_sum) * (float) (self.N * self.N / 2) / (float)(self.N*(__Khd__+__Kld__+__N_INTERACTIONS_FAR__))
+            # now_denominator_simi_LD = np.float32(acc1) 
+            # now_denominator_simi_LD = np.float32(sums_rands_multiplier*random_sum + sums_neighs_multiplier*neighs_sum)
+            # denominator_simi_LD = now_denominator_simi_LD
+            # if denominator_simi_LD < 1e-10:
+            #     denominator_simi_LD = 1e-10
+            # print(denominator_simi_LD/1e6, "  <---   denominator_simi_LD/1e6   random_sum/1e6: ", random_sum/1e6, "  neighs_sum/1e6: ", neighs_sum/1e6, " iter: ", iteration_int)
+refaire ici
+
 
             # ~~~~~~ recompute all neigh dists on HD hparam change (else can break)  ~~~~~~ 
-            pct_new_HD_neighs   = float(HD_n_new_neighs_sum.get()) / float(self.N)
-            do_HDnnDescent = not update_Psym_this_iteration
-            self.one_iteration(warmup, do_HDnnDescent, cuda_Xhd, read_Xld, write_Xld, cuda_Xld_nest, cuda_Xld_mmtm, knn_HD_read, knn_HD_write,\
+            pct_new_HD_neighs = float(HD_n_new_neighs_sum.get()) / float(self.N)
+            do_HDnnDescent = (iteration_int < warmup_len) or (not update_Psym_this_iteration)
+            self.one_iteration(warmup, do_HDnnDescent, grad_acc_global, cuda_Xhd, read_Xld, write_Xld, cuda_Xld_nest, cuda_Xld_mmtm, knn_HD_read, knn_HD_write,\
                                  sqdists_HD_read, sqdists_HD_write, farthest_dist_HD_read, farthest_dist_HD_write, knn_LD_read, knn_LD_write,\
                                       sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, stream_neigh_HD, stream_neigh_LD,\
                                           stream_grads, cuda_has_new_HD_neighs, cuda_has_new_HD_neighs_acc,\
@@ -757,7 +774,9 @@ class fastSNE:
                                                 denominator_simi_LD, randoms_sumSnorms_LD, neighbours_sumSnorms_LD)
             
             # ~~~~~~ GUI communication ~~~~~~
-            if gui_data_prep_phase == 0: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
+            # booltest = (iteration_int % 100) <= 1
+            booltest = True
+            if gui_data_prep_phase == 0 and booltest: # copy cuda_Xld_true_A/B to cuda_Xld_temp in an async manner using stream_minMax*
                 # if we were copying the data for the GUI, notify the GUI that the data is ready
                 if busy_copying__for_GUI:
                     busy_copying__for_GUI = False
@@ -767,7 +786,7 @@ class fastSNE:
                         points_ready_for_rendering.value = True
                 self.gui_Xld_minFinder.async_reduce_this(gpu_array_to_reduce = read_Xld, stream=stream_minMax)
                 self.gui_Xld_maxFinder.async_reduce_this(gpu_array_to_reduce = read_Xld, stream=stream_minMax)
-            elif gui_data_prep_phase == 1: # perform the min-max reduction on cuda_Xld_temp, & scale the data to [0, 1] with the results
+            elif gui_data_prep_phase == 1 and booltest: # perform the min-max reduction on cuda_Xld_temp, & scale the data to [0, 1] with the results
                 self.scaling_of_points(read_Xld, cuda_Xld_temp_Xld, stream_minMax)
                 gui_done = False
                 busy_copying__for_GUI = False
@@ -776,10 +795,21 @@ class fastSNE:
                 if gui_done:
                     busy_copying__for_GUI = True
                     cuda_Xld_temp_Xld.get_async(stream=stream_minMax, ary=cpu_Xld_arr_on_smem)
+
+                    #   FOR TESTING PURPOSES       
+                    stream_minMax.synchronize()
+                    mins  = np.min(cpu_Xld_arr_on_smem, axis=0)
+                    maxs  = np.max(cpu_Xld_arr_on_smem, axis=0)
+                    ranges = maxs - mins
+                    cpu_Xld_arr_on_smem -= mins
+                    cpu_Xld_arr_on_smem /= ranges
+                    cpu_Xld_arr_on_smem *= 2.0
+                    cpu_Xld_arr_on_smem -= 1.0
+                    #   FOR TESTING PUROPOSES       
+
+
                     iteration.value = iteration_int
             gui_data_prep_phase = (gui_data_prep_phase + 1) % 2
-            """ if iteration_int > 12:
-                1/0 """
 
             # ~~~~~~ iteration end ~~~~~~
             isPhaseA = not isPhaseA 
@@ -789,6 +819,12 @@ class fastSNE:
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
 
+
+            # if iteration_int >= warmup_len + 30:
+            #     with gui_closed.get_lock():
+            #         gui_closed.value = True
+
+            """
             if iteration_int > 10 and (iteration_int % 10) == 0:
                 # print("-----  pct_new_HD_neighs: ",  np.round((pct_new_HD_neighs),2), "    iteration: ", iteration_int)
                 # testing, remove 
@@ -804,10 +840,11 @@ class fastSNE:
                 print("mean farD: ", np.round(mean_farthest_distHD, 4), " diff_v_EMA: ", np.round(mean_farthest_distHD - farthest_dists_sum_EMA, 2), "    pct_new_HD_neighs: ", np.round((pct_new_HD_neighs),4), "  i:", iteration_int)
                 stream_grads.synchronize()
                 # testing remove
-                if(iteration_int  >= 1000):
-                    tac = time.time()
-                    print("time elapsed: ", tac - tic)
-                    return
+                # if(iteration_int  >= 1000):
+                #     tac = time.time()
+                #     print("time elapsed: ", tac - tic)
+                #     return
+            """
 
         process_gui.join()
         cpu_shared_mem.unlink()
@@ -818,7 +855,7 @@ class fastSNE:
         1/0
 
     # all CUDA 'kernels' run in parallel, sync at the start of the iterations loop outside of this function
-    def one_iteration(self, warmup, do_HDnnDescent, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write,\
+    def one_iteration(self, warmup, do_HDnnDescent, grad_acc_global, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write,\
                     farthest_dist_HD_read, farthest_dist_HD_write, knn_LD_read, knn_LD_write, sqdists_LD_read, sqdists_LD_write, farthest_dist_LD_read, farthest_dist_LD_write, stream_neigh_HD, stream_neigh_LD, stream_grads,\
                     cuda_has_new_HD_neighs, cuda_has_new_HD_neighs_acc, HD_n_new_neighs_sum, cuda_Psym, cuda_Psym_knn,\
                         denominator_simi_LD, randoms_sumSnorms_LD, neighbours_sumSnorms_LD):
@@ -840,7 +877,7 @@ class fastSNE:
         if do_HDnnDescent:
             self.high_dim_refineKNN( Xhd, knn_HD_read, knn_HD_write, knn_LD_read, sqdists_HD_write, farthest_dist_HD_write, HD_n_new_neighs_sum, stream_neigh_HD, cuda_has_new_HD_neighs, cuda_has_new_HD_neighs_acc)
 
-        self.gradients_launch( not warmup, read_Xld, write_Xld, Xld_nest, Xld_mmtm, cuda_Psym, cuda_Psym_knn, knn_LD_read, self.kern_alpha, randoms_sumSnorms_LD, neighbours_sumSnorms_LD, stream_grads, denominator_simi_LD)
+        self.gradients_launch( not warmup, grad_acc_global, read_Xld, write_Xld, Xld_nest, Xld_mmtm, cuda_Psym, cuda_Psym_knn, knn_LD_read, self.kern_alpha, randoms_sumSnorms_LD, neighbours_sumSnorms_LD, stream_grads, denominator_simi_LD)
 
         if (self.periodic_1000 % 61) == 0 or self.periodic_1000 < 3:
             stream_neigh_LD.synchronize()
@@ -856,11 +893,13 @@ class fastSNE:
         stream_minMax.synchronize()
         global_min = (self.gui_Xld_minFinder.get())
         global_max = (self.gui_Xld_maxFinder.get())
+        print(global_max - global_min, "  diameter     global_min: ", global_min, "  global_max: ", global_max)
         block_shape  = self.Kshapes_transpose.block_x, self.Kshapes_transpose.block_y, 1
         grid_shape   = self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size, 1
         smem_n_bytes = self.Kshapes_transpose.smem_n_bytes_per_block
         self.scaling_X_cu(Xld_read, Xld_scaled, np.float32(global_min), np.float32(global_max), np.uint32(self.N), np.uint32(self.Mld),\
                             block=block_shape, grid=grid_shape, stream=stream_minMax, shared=smem_n_bytes)
+        
     def fill_all_sqdists_HD(self, Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, stream):
         kernel = None 
         if self.dist_metric == 0:
@@ -930,29 +969,31 @@ class fastSNE:
                                     sqdists_HD_write, invRadii_HD, Psym, Pasm, Pasym_sums,block=block_shape, grid=grid_shape, stream=stream_neigh_HD, shared=smem_n_bytes) 
         return
     
-    def gradients_launch(self, do_gradients, read_Xld, write_Xld, Xld_nest, Xld_mmtm, cuda_Psym, cuda_Psym_knn, knn_LD_read, kern_alpha, randoms_sumSnorms_LD, neighbours_sumSnorms_LD, stream_grads, denominator_simi_LD):
+    def gradients_launch(self, do_gradients, grad_acc_global, read_Xld, write_Xld, Xld_nest, Xld_mmtm, cuda_Psym, cuda_Psym_knn, knn_LD_read, kern_alpha, randoms_sumSnorms_LD, neighbours_sumSnorms_LD, stream_grads, denominator_simi_LD):
         repulsion_multiplier = np.float32(1.0 / self.attrac_mult)        
-        lr = np.float32(0.01)
+        lr = np.float32(self.N) * 0.01
         # 1. nesterov parameters
         block_shape  = self.Kshapes_transpose.block_x, self.Kshapes_transpose.block_y, 1
         grid_shape   = self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size, 1
         smem_n_bytes = self.Kshapes_transpose.smem_n_bytes_per_block
-        self.kernel_make_Xnesterov(np.uint32(self.N), np.uint32(self.Mld), read_Xld, Xld_nest, Xld_mmtm, lr, block=block_shape, grid=grid_shape, stream=stream_grads, shared=smem_n_bytes)
+        self.kernel_make_Xnesterov(np.uint32(self.N), np.uint32(self.Mld), grad_acc_global, write_Xld, Xld_nest, Xld_mmtm, lr, block=block_shape, grid=grid_shape, stream=stream_grads, shared=smem_n_bytes)
 
-        # 2. gradients
+        # 2. gradients to gradient accs
         block_shape  = self.Kshapes2d_NxKhd_threads.block_x, self.Kshapes2d_NxKhd_threads.block_y, 1
         grid_shape   = self.Kshapes2d_NxKhd_threads.grid_x_size, self.Kshapes2d_NxKhd_threads.grid_y_size, 1
         smem_n_bytes = self.Kshapes2d_NxKhd_threads.smem_n_bytes_per_block
         seed         = np.uint32(np.random.randint(low = 1, high = __MAX_INT32_T__))
-        self.kernel_gradients(np.uint32(do_gradients), np.uint32(self.N), np.uint32(self.Mhd), np.uint32(self.Mld), lr, kern_alpha, seed, randoms_sumSnorms_LD.lvl1_, neighbours_sumSnorms_LD.lvl1_, Xld_nest, Xld_mmtm, write_Xld, cuda_Psym_knn, cuda_Psym, knn_LD_read,  repulsion_multiplier, np.float32(denominator_simi_LD), block=block_shape, grid=grid_shape, stream=stream_grads, shared=smem_n_bytes)
-    
-        # 3. sum of norms of randoms and neighbours
+        self.kernel_gradients(np.uint32(do_gradients), np.uint32(self.N), np.uint32(self.Mhd), np.uint32(self.Mld), lr, kern_alpha, seed, grad_acc_global, randoms_sumSnorms_LD.lvl1_, neighbours_sumSnorms_LD.lvl1_, Xld_nest, cuda_Psym_knn, cuda_Psym, knn_LD_read,  repulsion_multiplier, np.float32(denominator_simi_LD), block=block_shape, grid=grid_shape, stream=stream_grads, shared=smem_n_bytes)
+
+        # 3. gradient accs to momentum & parameters
+        block_shape  = self.Kshapes_transpose.block_x, self.Kshapes_transpose.block_y, 1
+        grid_shape   = self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size, 1
+        smem_n_bytes = self.Kshapes_transpose.smem_n_bytes_per_block
+        self.receive_gradients(np.uint32(self.N), np.uint32(self.Mld), grad_acc_global, write_Xld, Xld_mmtm, lr, block=block_shape, grid=grid_shape, stream=stream_grads, shared=smem_n_bytes)
+
+        # 4. sum of norms of randoms and neighbours
         randoms_sumSnorms_LD.async_reduce(stream=stream_grads)
         neighbours_sumSnorms_LD.async_reduce(stream=stream_grads)
-
-        stream_grads.synchronize()
-        print(" sum of norms of randoms and neighbours: ", randoms_sumSnorms_LD.get(), neighbours_sumSnorms_LD.get())
-        print()
 
         # randoms_sumSnorms_LD, neighbours_sumSnorms_LD
         # cuda.memcpy_dtod_async(self.lvl1_.gpudata, gpu_array_to_reduce.gpudata, gpu_array_to_reduce.nbytes, stream)
