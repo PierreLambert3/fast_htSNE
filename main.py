@@ -22,14 +22,12 @@ def fetch_dataset():
     Y = np.fromfile(mnist_Y_filename, dtype=np.float32).reshape(N, 1)
 
 
-    N_sampled = 24000
-    perms = np.random.permutation(N)
-    X = X[perms[:N_sampled], :]
-    Y = Y[perms[:N_sampled], :]
-    N = N_sampled 
-    return N, M, X, Y.astype(np.int32)
-
-
+    # N_sampled = 24000
+    # perms = np.random.permutation(N)
+    # X = X[perms[:N_sampled], :]
+    # Y = Y[perms[:N_sampled], :]
+    # N = N_sampled 
+    # return N, M, X, Y.astype(np.int32)
 
     # allocate new dataset
     n_times_larger = 1

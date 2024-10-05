@@ -834,7 +834,7 @@ __global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uin
     }
 }
 
-__global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd, uint32_t Mld, float lr, float cauchy_alpha, uint32_t seed, float* grad_acc_global, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, uint32_t* knn_HD, float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
+__global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_eps, uint32_t N, uint32_t Mhd, uint32_t Mld, float lr, float cauchy_alpha, uint32_t seed, float* grad_acc_global, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, uint32_t* knn_HD, float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t khd            = threadIdx.x;
@@ -936,29 +936,34 @@ __global__ void kernel_gradients(uint32_t do_gradients, uint32_t N, uint32_t Mhd
     float* gradients_khds = (float*) &_smem_GeneralGradients[idx0 + obs_i_in_block*KHD];
     gradients_khds[khd] = 0.0f;
     idx0 += n_obs_in_block*KHD;
-    float Pij1 = Psym[obs_i_global * KHD + khd];
+    float Pij1 = Psym[obs_i_global * KHD + khd] * exag;
     float _A_1 = 0.0f, _A_2 = 0.0f, _B_1 = 0.0f, _B_2 = 0.0f;
     float grad_prefix_1 = 0.0f, grad_prefix_2 = 0.0f;
-    if(Pij1 > 1.0f || Pij1 < 0.0f || qij1 < 0.0f || qij1 > 1.0f ||qij2 < 0.0f || qij2 > 1.0f || wij1 < 0.0f || wij2 < 0.0f || wij1 > 1.0f || wij2 > 1.0f){
-        printf("\\n\\n\\n\\n------------------------------------\\n\\n--------  ERROR Pij1: %e  ---------\\n\\n\\n\\n", Pij1);
-    }
     // ~~~~~~~~ 2.1 precompute i <--> j1/2 gradient prefix  ~~~~~~~~
 
-    // repuls_multiplier = 20.0f * 0.35f;
-    // repuls_multiplier *= 20.0f / 0.35f;
+//perplexité???
 
-perplexité???
+//il fallait faire attraction x10 et repulsion x10
+
+
+//faire que attrac/ reduce soit entre 0 et 1 et soit alpha*attrac + (1-alpha)*repuls
+
+    lr *= 10.0f;
+    Pij1               *= 2.0f;
+    repuls_multiplier  *= 10.0f;
+
+   
     _A_1 = Pij1  - (qij1 * repuls_multiplier);
-    _B_1 = powf(wij1,__frcp_rn(cauchy_alpha));
+    _B_1 = grad_eps + powf(wij1,__frcp_rn(cauchy_alpha));
     grad_prefix_1 = _A_1 * _B_1;
     if(has_other){
         _A_2 = 0.0f - (qij2 * repuls_multiplier);
-        _B_2 = powf(wij2, __frcp_rn(cauchy_alpha));
+        _B_2 = grad_eps + powf(wij2, __frcp_rn(cauchy_alpha));
         grad_prefix_2 = _A_2 * _B_2;
         if(!other_is_neigh){
             float scaling_factor = 0.5f * (float) (N-1u) / (float) N_INTERACTIONS_FAR;
+            // float scaling_factor = (float) (N-1u) / (float) N_INTERACTIONS_FAR;
             grad_prefix_2 *= scaling_factor;
-            problem was here
         }
     }
 
@@ -975,7 +980,6 @@ perplexité???
             grad2 = grad_prefix_2 * (xi_m - xj2_m);
         }
         
-
         // perplexity change: no effect. find why, could be the reason
 
         
@@ -984,6 +988,7 @@ perplexité???
         if(has_other){
             atomicAdd(&grad_acc_global[j_2 * Mld + m], grad2); // needs to be of opposite sign to the one in is_main
         }
+        
         // sum the gradients along the KHD dimension to collapse KLD on each i
         gradients_khds[khd] = grad1 + grad2;
         reduce1d_sum_float(gradients_khds, KHD, khd);
@@ -1010,15 +1015,17 @@ __global__ void receive_gradients(uint32_t N, uint32_t M, float* grad_acc_global
     uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
     uint32_t m              = threadIdx.x;
     if(obs_i_global >= N || m >= M) { return; }
-    float grad_m     = -grad_acc_global[obs_i_global * M + m];
+    float grad_m     = -grad_acc_global[obs_i_global * M + m] * 0.5f;
     float xi_m       = write_Xld[obs_i_global * M + m];
     float mmtm_m     = Xld_mmtm[obs_i_global * M + m];
 
     // update momentum
+    // float new_mmtm_m = mmtm_m * 0.95f - grad_m;
     float new_mmtm_m = mmtm_m * 0.9f - grad_m;
     Xld_mmtm[obs_i_global * M + m] = new_mmtm_m;
     // update position
-    float new_xi_m = xi_m + lr * new_mmtm_m;
+    //float new_xi_m = xi_m + 0.1f * lr * new_mmtm_m;
+    float new_xi_m = xi_m + 0.5f * lr * new_mmtm_m;
     write_Xld[obs_i_global * M + m] = new_xi_m;
     return;
 }
@@ -1032,16 +1039,10 @@ __global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* grad_acc_gl
     if (obs_i_global >= N || m >= M) { return; }
     float param    = params[obs_i_global * M + m];
     float momentum = momenta[obs_i_global * M + m];
-
-
     nest[obs_i_global * M + m] = param + lr * momentum;
-    // nest[obs_i_global * M + m] = param;
-
-    // reset grad_acc_global
-    grad_acc_global[obs_i_global * M + m] = 0.0f;
+    grad_acc_global[obs_i_global * M + m] = 0.0f; // reset gradient accumulators
     return;
 }
-
 
 // --------------------------------------------------------------------------------------------------
 // -------------------------------------  candidate neighbours  ------------------------------------------
@@ -1094,22 +1095,29 @@ __global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neigh
     // ~~~~~~~~ load 3 values from global mem  ~~~~~~~~
     uint32_t j   = knn_HD_write[obs_i_global * KHD + k];
     float sq_dij = sqdists_HD_write[obs_i_global * KHD + k];
-    float p_ij   = Pasm[obs_i_global * KHD + k];
     float invRad_j   = invRadii_HD[j];
     // ~~~~~~~~ fetch Pasym_sum using shared memory  ~~~~~~~~
     float* smem_temp_float = (float*) &_2smem_radiiP[obs_i_in_block];
-    if(is_main){ smem_temp_float[0] = Pasym_sums[obs_i_global];}
+    if(is_main){ 
+        smem_temp_float[0] = Pasym_sums[obs_i_global];
+    }
     __syncthreads();
     float Pasm_i_sum = smem_temp_float[0];
     float Pasm_j_sum = Pasym_sums[j];
-    Pasm_j_sum = fmaxf(Pasm_j_sum, 1e-12f);
-    Pasm_i_sum = fmaxf(Pasm_i_sum, 1e-12f);
+    Pasm_j_sum = fmaxf(Pasm_j_sum, 1e-16f);
+    Pasm_i_sum = fmaxf(Pasm_i_sum, 1e-16f);
     // ~~~~~~~~  symmetrized Pij  ~~~~~~~~
-    float Pij = p_ij / Pasm_i_sum;
-    float Pji = __expf(-sq_dij * invRad_j) / Pasm_j_sum;
+    float sij = Pasm[obs_i_global * KHD + k];
+    float sji = __expf(-sq_dij * invRad_j);
+
+    float Pij = sij / Pasm_i_sum;
+    float Pji = sji / Pasm_j_sum;
     Pji = fminf(Pji, 1.0f); // no guarantee that Pji is < 1.0 if not mutual neighbours
     // ~~~~~~~~ save to global  ~~~~~~~~
     Psym[obs_i_global * KHD + k]  = (Pij + Pji) / (2.0f * (float)N);
+
+//    Psym[obs_i_global * KHD + k] *= 2.0f;
+
     P_knn[obs_i_global * KHD + k] = j;
 }
 
@@ -2135,7 +2143,7 @@ __global__ void kernel_scale_X(float* X_in, float* X_out, float min_val, float m
 
 
     // X_out[obs_i_global*M + m] = scaled ;
-    X_out[obs_i_global*M + m] = X_in[obs_i_global*M + m];
+    X_out[obs_i_global*M + m] = scaled;
 
 
     return;
