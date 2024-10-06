@@ -203,6 +203,22 @@ class ModernGLWindow(pyglet.window.Window):
         # label containing the iteration number
         self.label_iteration = pyglet.text.Label(f"Iteration: {self.iteration.value}", x=window_width - 10, y=window_height - 10, anchor_x='right', anchor_y='top', color=__AMBER_DARK__, font_size=12)
 
+        slider_01_value = 0.5
+        nonlinear_01_value = (((slider_01_value-0.5)*np.abs(slider_01_value-0.5))/0.25)*0.5 + 0.5
+        alpha_value = 1.0
+        if nonlinear_01_value < 0.5:
+            alpha_value = self.min_kernel_alpha + 2.0 * slider_01_value * (1.0 - self.min_kernel_alpha)
+        else:
+            alpha_value = 1.0 + 2.0 * slider_01_value * (self.max_kernel_alpha - 1.0)
+        self.slider_kernel_alpha.value = round(alpha_value, 2)
+        self.value = alpha_value
+        handle_y = self.slider_kernel_alpha.y + slider_01_value * self.slider_kernel_alpha.height
+        tiny_line_y = 2 + handle_y
+        self.slider_kernel_alpha.handle.y = handle_y
+        self.slider_kernel_alpha.handle_highlight.y = handle_y
+        self.slider_kernel_alpha.tiny_line.y = tiny_line_y
+        self.slider_kernel_alpha.label_value.y = tiny_line_y
+        self.slider_kernel_alpha.label_value.text = str(self.value)
 
     def setup_shaders(self):
         #TODO cool neon effects
@@ -312,7 +328,31 @@ class ModernGLWindow(pyglet.window.Window):
                 with self.perplexity.get_lock():
                     self.perplexity.value = self.slider_perplexity.value
             if self.slider_kernel_alpha.dragging:
-                self.slider_kernel_alpha.update(x, y)
+                #self.slider_kernel_alpha.update(x, y)
+                
+                slider_01_value = (y - self.slider_kernel_alpha.y) / self.slider_kernel_alpha.height
+                if(slider_01_value < 0.0):
+                    slider_01_value = 0.0
+                if(slider_01_value > 1.0):
+                    slider_01_value = 1.0
+                nonlinear_01_value = (((slider_01_value-0.5)*np.abs(slider_01_value-0.5))/0.25)*0.5 + 0.5
+
+                alpha_value = 1.0
+                if nonlinear_01_value < 0.5:
+                    alpha_value = self.min_kernel_alpha + 2.0 * slider_01_value * (1.0 - self.min_kernel_alpha)
+                else:
+                    alpha_value = ((slider_01_value - 0.5) * 2.0) * (self.max_kernel_alpha - 1.0) + 1.0
+
+                self.slider_kernel_alpha.value = round(alpha_value, 2)
+                self.value = alpha_value
+                handle_y = self.slider_kernel_alpha.y + slider_01_value * self.slider_kernel_alpha.height
+                tiny_line_y = 2 + handle_y
+                self.slider_kernel_alpha.handle.y = handle_y
+                self.slider_kernel_alpha.handle_highlight.y = handle_y
+                self.slider_kernel_alpha.tiny_line.y = tiny_line_y
+                self.slider_kernel_alpha.label_value.y = tiny_line_y
+                self.slider_kernel_alpha.label_value.text = str(self.value)
+
                 with self.kernel_alpha.get_lock():
                     self.kernel_alpha.value = self.slider_kernel_alpha.value
             if self.slider_attrac_mult.dragging:

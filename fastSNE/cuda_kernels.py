@@ -899,9 +899,10 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
     // ~~~~~~~~ 1.2    j2  (LD neigh or rand sample)  ~~~~~~~~
     float* smem_KLD_then_FAR = (float*) &_smem_GeneralGradients[idx0 + obs_i_in_block*(KLD + N_INTERACTIONS_FAR)];
     idx0 += n_obs_in_block*(KLD + N_INTERACTIONS_FAR);
+    float sq_eucl2 = 0.0f;
     if(has_other){
         Xj2 = &X_nest[j_2 * Mld];
-        float sq_eucl2 = squared_euclidean_distance(Xi_ld, Xj2, Mld);
+        sq_eucl2 = squared_euclidean_distance(Xi_ld, Xj2, Mld);
         wij2 = 1.0f / __powf(1.0f + sq_eucl2/cauchy_alpha, cauchy_alpha);
         qij2 = wij2 / denominatorLD;
         smem_KLD_then_FAR[khd] = wij2;
@@ -927,6 +928,16 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
         sumSnorms_neighs[obs_i_global] = sum_neighs; // slow
     }
     __syncthreads();
+
+
+    // ~~~~~ find the max LD dist value in the KLD neighbours ~~~~~
+    if(has_other && other_is_neigh){
+        smem_KLD_then_FAR[khd] = sq_eucl2;
+    }
+    reduce1d_max_float(smem_KLD_then_FAR, KLD, khd);
+    float LD_neigh_dist_threashold = smem_KLD_then_FAR[0];
+    __syncthreads();
+
     // ~~~~~ stop after sum of LD similarities if warmup ~~~~~
     if(do_gradients < 1){
         return;
@@ -946,30 +957,61 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
 //il fallait faire attraction x10 et repulsion x10
 
 
-//faire que attrac/ reduce soit entre 0 et 1 et soit alpha*attrac + (1-alpha)*repuls
 
-    lr *= 10.0f;
-    Pij1               *= 2.0f;
-    repuls_multiplier  *= 10.0f;
+// retirer double comptage KLD et KHD en calculant la max dist LD avant les gradietns
+
+// OLD 4 LINES:
+    //float attrac_multiplier = 1.0f;
+    //lr *= 10.0f;
+    //Pij1               *= 2.0f;
+    //repuls_multiplier  *= 10.0f;
+
+    
+// NEW 4 LINES:
+    float attrac_multiplier = 1.0f - repuls_multiplier;
+    //lr                *= 5.0f;
+    //attrac_multiplier *= 4.0f;
+    //repuls_multiplier *= 20.0f;
+
+
+// new new
+    lr *= 1.0f;
+
+
+    /*
+    1/ doublons
+    2/ relire vieux code et comparer les gradients et denominator
+    3/ faire autre slider: LR multiplier 
+        et boutton reset embedding (set as linear projection to 1) a cote de explosion
+        et boutton exaggerate
+    4/ perp change: il faut mettre les flags pendant 2 iterations. dans la fonction: tester de faire genre PP*=-1 pour voir si il y a bien un effet, car wtf la PP
+    */
 
    
-    _A_1 = Pij1  - (qij1 * repuls_multiplier);
+    // _A_1 = Pij1 * attrac_multiplier  - (qij1 * repuls_multiplier);
+    if(sq_eucl1 > LD_neigh_dist_threashold){
+        _A_1 = Pij1 * attrac_multiplier  - (qij1 * repuls_multiplier);
+    }
+    else{
+        _A_1 = Pij1 * attrac_multiplier;
+    }
+
+
     _B_1 = grad_eps + powf(wij1,__frcp_rn(cauchy_alpha));
-    grad_prefix_1 = _A_1 * _B_1;
+    grad_prefix_1 = 4.0f * _A_1 * _B_1;
     if(has_other){
-        _A_2 = 0.0f - (qij2 * repuls_multiplier);
+        _A_2 = (0.0f - (qij2 * repuls_multiplier));
         _B_2 = grad_eps + powf(wij2, __frcp_rn(cauchy_alpha));
-        grad_prefix_2 = _A_2 * _B_2;
-        if(!other_is_neigh){
-            float scaling_factor = 0.5f * (float) (N-1u) / (float) N_INTERACTIONS_FAR;
-            // float scaling_factor = (float) (N-1u) / (float) N_INTERACTIONS_FAR;
+        grad_prefix_2 = 4.0f * _A_2 * _B_2;
+        if(!other_is_neigh){ // far sample: do as if there were (N-LKD) forces instead of nb of far samples
+            //float scaling_factor = 0.5f * (float) (N-1u) / (float) N_INTERACTIONS_FAR;
+            float scaling_factor = (float) (N-KLD) / (float) N_INTERACTIONS_FAR;
             grad_prefix_2 *= scaling_factor;
         }
     }
 
     for(uint32_t m = 0; m < Mld; m++){
         __syncthreads();
-        
         // compute gradient for each j1 (and j2), for m-th dimension
         float xi_m  = Xi_ld[m];
         float xj1_m = Xj1[m];
@@ -982,16 +1024,15 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
         
         // perplexity change: no effect. find why, could be the reason
 
-        
+        grad1 *= 0.5f;
+        grad2 *= 0.5f;
+        gradients_khds[khd] = grad1 + grad2;
+        reduce1d_sum_float(gradients_khds, KHD, khd); // sum the gradients along the KHD dimension to collapse KLD on each i
         // update other's grad_acc and khd grad_acc (more or less non-conflicting accesses)
         atomicAdd(&grad_acc_global[j_1 * Mld + m], grad1);
         if(has_other){
             atomicAdd(&grad_acc_global[j_2 * Mld + m], grad2); // needs to be of opposite sign to the one in is_main
         }
-        
-        // sum the gradients along the KHD dimension to collapse KLD on each i
-        gradients_khds[khd] = grad1 + grad2;
-        reduce1d_sum_float(gradients_khds, KHD, khd);
         if(is_main){
             atomicAdd(&grad_acc_global[obs_i_global * Mld + m], -gradients_khds[0]);
         }
@@ -1004,8 +1045,6 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
 //                 OR
 // |--------------------- K HD -----------------j1-|  
 // |--- K LD ---|------------ N FAR ---------|  j2 
-
-
     return;
 }
 
@@ -1020,11 +1059,14 @@ __global__ void receive_gradients(uint32_t N, uint32_t M, float* grad_acc_global
     float mmtm_m     = Xld_mmtm[obs_i_global * M + m];
 
     // update momentum
-    // float new_mmtm_m = mmtm_m * 0.95f - grad_m;
-    float new_mmtm_m = mmtm_m * 0.9f - grad_m;
+    float mmtm_alpha = 0.9f;
+    float new_mmtm_m = mmtm_m * mmtm_alpha - (grad_m) * (1.0f - mmtm_alpha) * 20.0f;
     Xld_mmtm[obs_i_global * M + m] = new_mmtm_m;
+
+    
+// ok tres bien. mtmt il me faut le boutton exag et le boutton lr control: il faut un mmtm/lr plus faible, mais avec possibilité de le rendre plus fort
+
     // update position
-    //float new_xi_m = xi_m + 0.1f * lr * new_mmtm_m;
     float new_xi_m = xi_m + 0.5f * lr * new_mmtm_m;
     write_Xld[obs_i_global * M + m] = new_xi_m;
     return;
@@ -1039,6 +1081,7 @@ __global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* grad_acc_gl
     if (obs_i_global >= N || m >= M) { return; }
     float param    = params[obs_i_global * M + m];
     float momentum = momenta[obs_i_global * M + m];
+    // "future" position
     nest[obs_i_global * M + m] = param + lr * momentum;
     grad_acc_global[obs_i_global * M + m] = 0.0f; // reset gradient accumulators
     return;
@@ -1048,18 +1091,26 @@ __global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* grad_acc_gl
 // -------------------------------------  candidate neighbours  ------------------------------------------
 // --------------------------------------------------------------------------------------------------
 __device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad, float* dists, float* Pi, float* arr_floats){
+    __syncthreads();
     // ~~~~~~~ asym Pij given ivRad  ~~~~~~~
     float Pnom    = __expf(-dists[k] * ivRad);    
+
+    Pnom += ((float)(KHD - k) / (float)KHD) * 0.1f / (float)KHD;
+
     arr_floats[k] = Pnom;
     // ~~~~~~~ 1. compute sum of Pnoms  ~~~~~~~
     reduce1d_sum_float(arr_floats, KHD, k);
     float sumP = arr_floats[0];
-    if(sumP < 1e-12f){
-        sumP = 1e-12f;
+    if(sumP < 1e-19f){
+        sumP = 1e-19f;
     }
     // ~~~~~~~ 2. compute sum of (asym Pijs) x (dist)  ~~~~~~~
-    float Pij = Pi[k] / sumP;
-    Pi[k] = Pij;
+    // set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
+    float Pij = Pi[k] / sumP;   NON : Pi is empty cf l appel. REECRIRE CETTE PARTIE
+    Pi[k] = Pij;                NON : Pi is empty  REECRIRE CETTE PARTIE
+
+il faut pas utiliser Pi (qui est vide), mais utiliser Pnom
+
     arr_floats[k] = Pij * dists[k];
     reduce1d_sum_float(arr_floats, KHD, k);
     if(k == 0){
@@ -1145,6 +1196,7 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         return;
     }
     __syncthreads();
+    
 
     // ~~~~~~~~ load init invRadii  ~~~~~~~~
     float* smem_temp_float = (float*) &_smem_radiiP[obs_i_in_block];
@@ -1159,12 +1211,28 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     if (target_perplexity < 1.5f){
         target_perplexity = 1.5f;
     }
-    float perplexity_now = 0.0f; float PP_tol = 0.01f*target_perplexity;
+
+    target_perplexity *= 0.06f;
+
+
+    float perplexity_now = 0.0f;
+    if(target_perplexity < 0.1f){
+        target_perplexity = 0.1f;}
+    float PP_tol = 0.01f*target_perplexity;
     if(PP_tol < 0.05){
         PP_tol = 0.05;}
+
     float max_entropy = __logf(target_perplexity + PP_tol);
     float min_entropy = __logf(target_perplexity - PP_tol);
-    float desired_entropy = (max_entropy + min_entropy) / 2.0f;
+    float desired_entropy = __logf(target_perplexity);
+
+    /*
+    if(obs_i_global == 0 && k == 0){
+        printf("min, desired, max : %.3f %.3f %.3f\\n", min_entropy, desired_entropy, max_entropy);
+        printf("PPmin, PPdesired, PPmax : %.3f %.3f %.3f\\n", expf(min_entropy), expf(desired_entropy), expf(max_entropy));
+    }
+    */
+
 
     // ~~~~~~~~ shared memory  ~~~~~~~~
     float* smem_sqDists = &_smem_radiiP[(n_obs_in_block * KHD)*0 + obs_i_in_block * KHD];
@@ -1228,7 +1296,7 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         // ~~~~~~~~  binary search using the bounds  ~~~~~~~~
         if(direction_changed && (!H_ok && !iter_limit_reached)){
             uint32_t iter_binSearch = 0;
-            while(!H_ok && iter_binSearch < 500){
+            while(!H_ok && iter_binSearch < 100){
                 iter_binSearch++;
                 direction = desired_entropy - entropy;
                 grow = direction < 0.0f;
@@ -1267,14 +1335,14 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         Pasym_sums[obs_i_global] = sumPasm;
     }
 
-    /*
     set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
     entropy = temp_floats[0];
-    if(is_main && (seed_obs_i % 10000) == 0){
-        float perplexity_now = __expf(entropy);
-        printf("perplexity  %f\\n", perplexity_now);
+    perplexity_now = __expf(entropy);
+    if(perplexity_now < target_perplexity-0.1f || perplexity_now > target_perplexity+0.1f || (obs_i_global == 0 && k == 0)){
+        printf("perplexity  %f    (target %.3f)\\n", perplexity_now, target_perplexity);
     }
-    */
+
+
     return;
 }
 

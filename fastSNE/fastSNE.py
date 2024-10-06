@@ -17,8 +17,8 @@ __DEVICE_NUMBER__ = 0 # the GPU device to use
 __MIN_PERPLEXITY__ = 1.5
 __MAX_KERNEL_ALPHA__ = 100.0
 __MIN_KERNEL_ALPHA__ = 0.05
-__MAX_ATTRACTION_MULTIPLIER__ = 10.0
-__MIN_ATTRACTION_MULTIPLIER__ = 0.1
+__MAX_ATTRACTION_MULTIPLIER__ = 1.0
+__MIN_ATTRACTION_MULTIPLIER__ = 0.05
 
 __PCT_HISTORY_SIZE__  = 500
 
@@ -400,7 +400,7 @@ class fastSNE:
         assert self.Mld >= 2
         self.kern_alpha   = np.float32(1.0)
         self.perplexity   = np.float32(5.0)
-        self.attrac_mult  = np.float32(1.0)
+        self.attrac_mult  = np.float32(0.5)
         self.dist_metric  = 0
         assert self.dist_metric in [0, 1, 2, 3]
         assert self.kern_alpha < __MAX_KERNEL_ALPHA__ and self.kern_alpha > __MIN_KERNEL_ALPHA__
@@ -795,7 +795,10 @@ class fastSNE:
                 self.gui_Xld_maxFinder.async_reduce_this(gpu_array_to_reduce = read_Xld, stream=stream_minMax)
             elif gui_data_prep_phase == 1: # perform the min-max reduction on cuda_Xld_temp, & scale the data to [0, 1] with the results
                 diameter = self.scaling_of_points(read_Xld, cuda_Xld_temp_Xld, stream_minMax)
-                grad_eps = diameter * 1e-4
+                print("diameter: ", diameter)
+                grad_eps = diameter * 1e-2  # unstable with small alpha values
+                # grad_eps = diameter * 1e-14
+                grad_eps = 0.0
                 gui_done = False
                 busy_copying__for_GUI = False
                 with points_rendering_finished.get_lock():
@@ -805,14 +808,14 @@ class fastSNE:
                     cuda_Xld_temp_Xld.get_async(stream=stream_minMax, ary=cpu_Xld_arr_on_smem)
 
                     #   FOR TESTING PURPOSES       
-                    # stream_minMax.synchronize()
-                    # mins  = np.min(cpu_Xld_arr_on_smem, axis=0)
-                    # maxs  = np.max(cpu_Xld_arr_on_smem, axis=0)
-                    # ranges = maxs - mins
-                    # cpu_Xld_arr_on_smem -= mins
-                    # cpu_Xld_arr_on_smem /= ranges
-                    # cpu_Xld_arr_on_smem *= 2.0
-                    # cpu_Xld_arr_on_smem -= 1.0
+                    stream_minMax.synchronize()
+                    mins  = np.min(cpu_Xld_arr_on_smem, axis=0)
+                    maxs  = np.max(cpu_Xld_arr_on_smem, axis=0)
+                    ranges = maxs - mins
+                    cpu_Xld_arr_on_smem -= mins
+                    cpu_Xld_arr_on_smem /= ranges
+                    cpu_Xld_arr_on_smem *= 2.0
+                    cpu_Xld_arr_on_smem -= 1.0
                     #   FOR TESTING PUROPOSES       
 
 
@@ -979,7 +982,9 @@ class fastSNE:
         return
     
     def gradients_launch(self, exag, do_gradients, grad_eps, grad_acc_global, read_Xld, write_Xld, Xld_nest, Xld_mmtm, cuda_Psym, cuda_Psym_knn, knn_LD_read, kern_alpha, randoms_sumSnorms_LD, neighbours_sumSnorms_LD, stream_grads, denominator_simi_LD):
-        repulsion_multiplier = np.float32(1.0 / self.attrac_mult)        
+        # repulsion_multiplier = np.float32(1.0 / self.attrac_mult)    
+        repulsion_multiplier = np.float32(1.0 - self.attrac_mult)    
+            
         # lr = np.float32(self.N) * 0.5
         lr = np.float32(self.N) * 0.05
         # lr = np.float32(self.N) * 0.75
