@@ -1093,7 +1093,8 @@ __global__ void kernel_make_Xnesterov(uint32_t N, uint32_t M, float* grad_acc_gl
 __device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad, float* dists, float* Pi, float* arr_floats){
     __syncthreads();
     // ~~~~~~~ asym Pij given ivRad  ~~~~~~~
-    float Pnom    = __expf(-dists[k] * ivRad);    
+    float sq_dist = dists[k];
+    float Pnom    = __expf(-sq_dist * ivRad);    
 
     Pnom += ((float)(KHD - k) / (float)KHD) * 0.1f / (float)KHD;
 
@@ -1104,8 +1105,26 @@ __device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad
     if(sumP < 1e-19f){
         sumP = 1e-19f;
     }
+    /*
+
+//peut etre dist au lieu de sq dists?
+
+
+    arr_floats[k] = sq_dist * Pnom / sumP;
+    reduce1d_sum_float(arr_floats, KHD, k);
+    if(k == 0){
+        float sumPxD = arr_floats[0];
+        // ~~~~~~~ 3. compute entropy  ~~~~~~~
+        float entropy = __logf(sumP) + ivRad * sumPxD;
+        arr_floats[0] = entropy;
+    }
+
+    __syncthreads();
+    
+    */
+    
+    
     // ~~~~~~~ 2. compute sum of (asym Pijs) x (dist)  ~~~~~~~
-    // set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
     float Pij = Pi[k] / sumP;   NON : Pi is empty cf l appel. REECRIRE CETTE PARTIE
     Pi[k] = Pij;                NON : Pi is empty  REECRIRE CETTE PARTIE
 
@@ -1166,9 +1185,6 @@ __global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neigh
     Pji = fminf(Pji, 1.0f); // no guarantee that Pji is < 1.0 if not mutual neighbours
     // ~~~~~~~~ save to global  ~~~~~~~~
     Psym[obs_i_global * KHD + k]  = (Pij + Pji) / (2.0f * (float)N);
-
-//    Psym[obs_i_global * KHD + k] *= 2.0f;
-
     P_knn[obs_i_global * KHD + k] = j;
 }
 
@@ -1212,7 +1228,7 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         target_perplexity = 1.5f;
     }
 
-    target_perplexity *= 0.06f;
+    target_perplexity *= 0.06f; attention à ici avec la rectification de l erreur
 
 
     float perplexity_now = 0.0f;
