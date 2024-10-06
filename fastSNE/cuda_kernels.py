@@ -1095,9 +1095,6 @@ __device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad
     // ~~~~~~~ asym Pij given ivRad  ~~~~~~~
     float sq_dist = dists[k];
     float Pnom    = __expf(-sq_dist * ivRad);    
-
-    Pnom += ((float)(KHD - k) / (float)KHD) * 0.1f / (float)KHD;
-
     arr_floats[k] = Pnom;
     // ~~~~~~~ 1. compute sum of Pnoms  ~~~~~~~
     reduce1d_sum_float(arr_floats, KHD, k);
@@ -1105,10 +1102,6 @@ __device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad
     if(sumP < 1e-19f){
         sumP = 1e-19f;
     }
-    /*
-
-//peut etre dist au lieu de sq dists?
-
 
     arr_floats[k] = sq_dist * Pnom / sumP;
     reduce1d_sum_float(arr_floats, KHD, k);
@@ -1119,25 +1112,6 @@ __device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad
         arr_floats[0] = entropy;
     }
 
-    __syncthreads();
-    
-    */
-    
-    
-    // ~~~~~~~ 2. compute sum of (asym Pijs) x (dist)  ~~~~~~~
-    float Pij = Pi[k] / sumP;   NON : Pi is empty cf l appel. REECRIRE CETTE PARTIE
-    Pi[k] = Pij;                NON : Pi is empty  REECRIRE CETTE PARTIE
-
-il faut pas utiliser Pi (qui est vide), mais utiliser Pnom
-
-    arr_floats[k] = Pij * dists[k];
-    reduce1d_sum_float(arr_floats, KHD, k);
-    if(k == 0){
-        float sumPxD = arr_floats[0];
-        // ~~~~~~~ 3. compute entropy  ~~~~~~~
-        float entropy = __logf(sumP) + ivRad * sumPxD;
-        arr_floats[0] = entropy;
-    }
     __syncthreads();
 }
 
@@ -1228,9 +1202,6 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         target_perplexity = 1.5f;
     }
 
-    target_perplexity *= 0.06f; attention à ici avec la rectification de l erreur
-
-
     float perplexity_now = 0.0f;
     if(target_perplexity < 0.1f){
         target_perplexity = 0.1f;}
@@ -1241,14 +1212,6 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     float max_entropy = __logf(target_perplexity + PP_tol);
     float min_entropy = __logf(target_perplexity - PP_tol);
     float desired_entropy = __logf(target_perplexity);
-
-    /*
-    if(obs_i_global == 0 && k == 0){
-        printf("min, desired, max : %.3f %.3f %.3f\\n", min_entropy, desired_entropy, max_entropy);
-        printf("PPmin, PPdesired, PPmax : %.3f %.3f %.3f\\n", expf(min_entropy), expf(desired_entropy), expf(max_entropy));
-    }
-    */
-
 
     // ~~~~~~~~ shared memory  ~~~~~~~~
     float* smem_sqDists = &_smem_radiiP[(n_obs_in_block * KHD)*0 + obs_i_in_block * KHD];
@@ -1354,7 +1317,8 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
     entropy = temp_floats[0];
     perplexity_now = __expf(entropy);
-    if(perplexity_now < target_perplexity-0.1f || perplexity_now > target_perplexity+0.1f || (obs_i_global == 0 && k == 0)){
+    
+    if(perplexity_now < target_perplexity- PP_tol || perplexity_now > target_perplexity+PP_tol || (obs_i_global == 0 && k == 0)){
         printf("perplexity  %f    (target %.3f)\\n", perplexity_now, target_perplexity);
     }
 
