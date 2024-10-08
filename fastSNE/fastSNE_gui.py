@@ -23,6 +23,9 @@ def gen_K_random_colours(K):
     return (kmeans.cluster_centers_).astype(np.float32)
 
 def determine_Y_colour(Y):
+    if Y.shape[1] == 3:
+        return Y
+
     cpu_Y_colours = np.zeros((len(Y), 3), dtype=np.float32)
     is_classification  = type(Y[0, 0]) == np.int32
     if is_classification:
@@ -179,15 +182,14 @@ class Button:
         return self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height
 
 class ModernGLWindow(pyglet.window.Window):
-    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please,\
+    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, reset_please,\
                  min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul, **kwargs):
         config = pyglet.gl.Config(double_buffer=True, depth_size=24, sample_buffers=1, samples=4)
         # config = pyglet.gl.Config(double_buffer=True)
         # super().__init__(config=config,vsync=True, **kwargs)
         super().__init__(config=config, vsync=True, **kwargs)
 
-        if(Mld != 2):
-            raise ValueError("Gui not implemented for Mld != 2")
+        
         if(N < 5):
             raise ValueError("Just do your embedding manually at this point")
         
@@ -201,6 +203,10 @@ class ModernGLWindow(pyglet.window.Window):
         # -------   data for the GUI   -------
         self.N   = N
         self.Mld = Mld
+        self.N_scatterplots = (Mld+(Mld - 1)) // 2
+        if self.Mld > 8:
+            self.N_scatterplots = 4
+        self.Xld_longer = np.zeros((N*self.N_scatterplots, 2), dtype=np.float32)
         # hyperparameters
         self.kernel_alpha = kernel_alpha # multiprocessing Value type
         self.perplexity   = perplexity   # multiprocessing Value type
@@ -213,8 +219,13 @@ class ModernGLWindow(pyglet.window.Window):
         self.points_rendering_finished  = points_rendering_finished  # multiprocessing Value type
         self.iteration = iteration # multiprocessing Value type
         self.explosion_request = explosion_please # multiprocessing Value type
+        self.reset_request = reset_please # multiprocessing Value type
         # colours for each point, on CPU
         self.Y_colours = determine_Y_colour(cpu_Y) # size (N, 3), colour of each observation (removes an "if" in the render function)
+        self.Y_longer = np.zeros((N*self.N_scatterplots, 3), dtype=np.float32)
+        for i in range(self.N_scatterplots):
+            self.Y_longer[i*N:(i+1)*N, :] = self.Y_colours
+
         # Xld on CPU
         self.cpu_Xld = np.ndarray((N, Mld), dtype=np.float32, buffer=cpu_shared_mem.buf)
         self.redraw_now = False
@@ -222,9 +233,9 @@ class ModernGLWindow(pyglet.window.Window):
         # -------   modernGL structs   -------
         self.ctx = mgl.create_context()
         #  Create VBO for positions
-        self.vbo_positions = self.ctx.buffer(self.cpu_Xld.astype('f4').tobytes())
+        self.vbo_positions = self.ctx.buffer(self.Xld_longer.astype('f4').tobytes())
         #  Create VBO for colors
-        self.vbo_colors = self.ctx.buffer(self.Y_colours.astype('f4').tobytes())
+        self.vbo_colors = self.ctx.buffer(self.Y_longer.astype('f4').tobytes())
         #  Create VAO
         self.vao_content = [
             (self.vbo_positions, '2f', 'in_vert'),  # 2 floats per vertex position
@@ -249,7 +260,8 @@ class ModernGLWindow(pyglet.window.Window):
         ]
         self.buttons[self.dist_metric.value].pressed = True
 
-        self.explosion_request_button = Button(0.55, -0.99, 0.44, 0.098, "Explosion please", window_width, window_height)
+        self.explosion_request_button = Button(0.55, -0.99, 0.44, 0.098, "Explosion", window_width, window_height)
+        self.reset_request_button = Button(0.55, -0.89, 0.44, 0.098, "Reset", window_width, window_height)
 
         self.slider_perplexity   = VerticalSlider(-0.9, 0.4, 0.05, 0.3, self.min_perplexity, self.max_perplexity, self.perplexity.value, window_width, window_height, "Perplexity")
         self.slider_kernel_alpha = VerticalSlider(0.85, 0.4, 0.05, 0.3, self.min_kernel_alpha, self.max_kernel_alpha, self.kernel_alpha.value, window_width, window_height, "Kernel alpha")
@@ -306,11 +318,15 @@ class ModernGLWindow(pyglet.window.Window):
         
         # render the screen
         self.ctx.clear()
+        # clear to white
+        # self.ctx.clear(1.0, 1.0, 1.0)
+        
         self.vao.render(mgl.POINTS)
 
         for button in self.buttons:
             button.draw()
         self.explosion_request_button.draw()
+        self.reset_request_button.draw()
         
         self.slider_perplexity.draw()
         self.slider_kernel_alpha.draw()
@@ -331,8 +347,20 @@ class ModernGLWindow(pyglet.window.Window):
         super().on_close()
 
     def retrieve_and_prepare_data(self):
-        updated_data = self.cpu_Xld.astype('f4').tobytes()
-        self.vbo_positions.write(updated_data)
+        # self.Xld_2by2 = np.zeros((N, self.N_scatterplots), dtype=np.float32)
+
+
+
+        if(self.Mld == 2):
+            self.vbo_positions.write(self.cpu_Xld.astype('f4').tobytes())
+        elif (self.Mld == 3):
+            self.Xld_longer[:self.N]         = (self.cpu_Xld[:, :2] * 0.45) - 0.3
+            self.Xld_longer[self.N:2*self.N] = (self.cpu_Xld[:, 1:3]*0.45)  + 0.3
+            self.vbo_positions.write(self.Xld_longer.astype('f4').tobytes())
+        elif (self.Mld >= 4):
+            self.Xld_longer[:self.N]         = (self.cpu_Xld[:, :2] * 0.45) - 0.3
+            self.Xld_longer[self.N:2*self.N] = (self.cpu_Xld[:, 2:4]*0.45)  + 0.3
+            self.vbo_positions.write(self.Xld_longer.astype('f4').tobytes())
     
     def update(self, dt):
         # only draw if the points were updated
@@ -379,6 +407,9 @@ class ModernGLWindow(pyglet.window.Window):
                 if self.explosion_request_button.is_inside(x, y):
                     with self.explosion_request.get_lock():
                         self.explosion_request.value = True
+                if self.reset_request_button.is_inside(x, y):
+                    with self.reset_request.get_lock():
+                        self.reset_request.value = True
             
     
     def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
@@ -482,14 +513,14 @@ class ModernGLWindow(pyglet.window.Window):
             self.ctrl_held = False
 
 class FastSNE_gui:
-    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul,window_w=640, window_h=480):
-        self.window = ModernGLWindow(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul, width=window_w, height=window_h, caption='fastSNE')
+    def __init__(self, cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, reset_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul,window_w=640, window_h=480):
+        self.window = ModernGLWindow(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, reset_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul, width=window_w, height=window_h, caption='fastSNE')
         pyglet.clock.schedule_interval(self.window.update, 1.0/__TARGET_FPS__)
         pyglet.app.run() # blocks until the window is closed, everything is event-driven from there on
 
-def gui_worker(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul):
+def gui_worker(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, reset_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul):
     # ipc for Xld_A and Xld_B
-    gui = FastSNE_gui(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul, window_w=800, window_h=800)
+    gui = FastSNE_gui(cpu_shared_mem, cpu_Y, N, Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, reset_please, min_perplexity, max_perplexity, min_kernel_alpha, max_kernel_alpha, min_attraction_mul, max_attraction_mul, window_w=800, window_h=800)
 
     # notify the main process that the GUI has been closed
     with gui_closed.get_lock():

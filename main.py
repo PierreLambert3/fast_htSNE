@@ -52,30 +52,31 @@ def fetch_dataset():
 # now do explode button and hirizontal lr mult 
 
 
-"""
-nouveau truc : 
-def get_coil20(N, dataset_params):
-    from scipy.io import loadmat
-    mat = loadmat("datasets/COIL20.mat")
-    X, Y = mat['X'], mat['Y']
-    Y = (Y.astype(int) - 1).reshape((-1,))
-    dataset_params['X'] = X
-    dataset_params['Y'] = Y
-    dataset_params['is_classification'] = True
-    dataset_params['colors'] = None
-    qsdqd
-    # dataset_params['supervised feature selection'] = True
 
 
-nouveau aussi
-def get_RNAseq(N, dataset_params):
-    if N == 3000:
-        filename = 'datasets/RNAseq_N3k.npy'
-    elif N == 6000:
-        filename = 'datasets/RNAseq_N10k.npy'
+def load_zfish_timeLabels():
+    X = np.load("datasets/zfish/zfish_X.npy")
+    N, M = X.shape
+    colours = np.load("datasets/zfish/zfish_stageRGB.npy")
+    from sklearn.decomposition import PCA
+    M = 20
+    X = PCA(n_components=M).fit_transform(X)
+    return N, M, X.astype(np.float32), colours / 256.0
+
+def load_zfish_classif():
+    X = np.load("datasets/zfish/zfish_X.npy").astype(np.float32)
+    N, M = X.shape
+    colours = np.load("datasets/zfish/zfish_classes.npy")
+    # pca of X
+    from sklearn.decomposition import PCA
+    M = 20
+    X = PCA(n_components=M).fit_transform(X)
+    return N, M, X.astype(np.float32), colours
+
+def get_RNAseq():
+    filename = 'datasets/RNAseq_N20k.npy'
     XY = np.load(filename)
     RNAcolors = np.load('datasets/RNAseq_colors.npy')
-
     rgb_colors = []
     for c in RNAcolors:
         rgb_colors.append(np.array(list(int(str(c).lstrip('#')[i:i+2], 16) for i in (0, 2, 4)))) # taken from https://stackoverflow.com/questions/29643352/converting-hex-to-rgb-value-in-python
@@ -88,18 +89,67 @@ def get_RNAseq(N, dataset_params):
     np.random.shuffle(perms)
     X = X[perms]
     Y = Y[perms]
+    N = X.shape[0]
+    M = X.shape[1]
 
-    dataset_params['X'] = X[:N]
-    dataset_params['Y'] = Y[:N]
-    dataset_params['is_classification'] = True
-    dataset_params['colors'] = rgb_colors
+    # Y becomes shape (N, 3) with the RBG value corresponding to the class
+    # 1. dictionary to map the class to the RGB value
+    class_to_rgb = {}
+    n_labels = len(np.unique(Y))
+    for i in range(n_labels):
+        class_to_rgb[i] = rgb_colors[i]
+    Y_new  = np.zeros((N, 3), dtype=np.int32)
+    for i in range(N):
+        Y_new[i] = class_to_rgb[Y[i]]
+    Y = Y_new
 
-"""
+    return N, M, X.astype(np.float32), Y.astype(np.float32) / 256.0
 
+def get_coil20():
+    from scipy.io import loadmat
+    mat = loadmat("datasets/COIL20.mat")
+    X, Y = mat['X'], mat['Y']
+    Y = (Y.astype(int) - 1).reshape((-1,))
+    N, M = X.shape
+    return N, M, X.astype(np.float32), Y
+
+def get_blobs():
+    from sklearn.datasets import make_blobs
+    X, Y = make_blobs(n_samples= 300 * 1000, n_features=20, centers=9, cluster_std=5.0)
+    N, M = X.shape
+    return N, M, X.astype(np.float32), Y
 
 def run_demo():
+
+   
     # fetch the dataset
-    N, M, X, Y = fetch_dataset()
+    # N, M, X, Y = fetch_dataset()
+    # N, M, X, Y = load_zfish_classif()
+    # N, M, X, Y = load_zfish_timeLabels()
+    N, M, X, Y = get_RNAseq()
+    # N, M, X, Y = get_coil20()
+    # N, M, X, Y = get_blobs()
+
+
+    """ print("unique labels", np.unique(Y))
+
+    print("N, M, X, Y", N, M, X.shape, Y.shape)
+    # do 2d pca
+    import matplotlib.pyplot as plt
+    from sklearn.decomposition import PCA
+    X2d = PCA(n_components=2).fit_transform(X)
+    plt.scatter(X2d[:, 0], X2d[:, 1], c=Y)
+    plt.show()
+    1/0 """
+
+
+
+    """  #do pca of X
+    from sklearn.decomposition import PCA
+    X2 = PCA(n_components=2).fit_transform(X)
+    plt.scatter(X2[:, 0], X2[:, 1], c=Y)
+    plt.show()
+    1/0 """
 
     with_GUI = True 
     tsne = fastSNE.fastSNE(with_GUI, n_components=2, random_state=None)

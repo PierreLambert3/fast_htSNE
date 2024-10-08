@@ -983,8 +983,9 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
             grad2 = grad_prefix_2 * (xi_m - xj2_m);
         }
 
-        
-
+        /*
+        2/ faire tryptic
+        */
 
         gradients_khds[khd] = grad1 + grad2;
         reduce1d_sum_float(gradients_khds, KHD, khd); // sum the gradients along the KHD dimension to collapse KLD on each i
@@ -2369,6 +2370,7 @@ __global__ void kernel_scale_X(float* X_in, float* X_out, float min_val, float m
     float value   = X_in[obs_i_global*M + m];
     float scaled  = (value - min_val) / (max_val - min_val);
     scaled = ((scaled - 0.5f) * 2.0f) * 0.75f;
+    
 
 
     // X_out[obs_i_global*M + m] = scaled ;
