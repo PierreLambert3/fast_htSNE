@@ -465,7 +465,7 @@ class fastSNE:
             raise Exception("fastSNE: the number of dimensions M must be at least 2")
         if np.isnan(Xhd).any():
             raise Exception("fastSNE: the high-dimensional data contains NaNs")
-        if __Khd__ >= (N/2-1):
+        if __Khd__ >= (N-10):
             raise Exception("fastSNE: the number of neighbours K is too large for the number of samples N (reducting __MAX_PERPLEXITY__ should do the trick)")
         if __N_CAND_LD__ < 32:
             raise Exception("fastSNE: __N_CAND_LD__ must be at least 32 (and preferably a multiple of 32). Change the values of __N_CAND_LD__ and __N_CAND_HD__ in cuda_kernels.py")
@@ -1022,6 +1022,15 @@ class fastSNE:
         repulsion_multiplier = np.float32(1.0 - self.attrac_mult)    
             
         lr = np.float32(self.N) * 0.1 * lr_multiplier
+        
+        if self.N < 1000:
+            lr /= 3.0
+        if self.N < 2500:
+            lr /= 2.0
+        if self.N < 1000:
+            lr /= 2.0
+        
+
         # 1. nesterov parameters
         block_shape  = self.Kshapes_transpose.block_x, self.Kshapes_transpose.block_y, 1
         grid_shape   = self.Kshapes_transpose.grid_x_size, self.Kshapes_transpose.grid_y_size, 1

@@ -21,14 +21,6 @@ def fetch_MNIST(atrificially_inflate_n_times=1):
     X = np.fromfile(mnist_X_filename, dtype=np.float32).reshape(N, M)
     Y = np.fromfile(mnist_Y_filename, dtype=np.float32).reshape(N, 1)
 
-
-    # N_sampled = 24000
-    # perms = np.random.permutation(N)
-    # X = X[perms[:N_sampled], :]
-    # Y = Y[perms[:N_sampled], :]
-    # N = N_sampled 
-    # return N, M, X, Y.astype(np.int32)
-
     # allocate new dataset
     N_new = N * atrificially_inflate_n_times
     X_new = np.zeros((N_new, M), dtype=np.float32)
@@ -109,17 +101,18 @@ def get_coil20():
 
 def get_blobs():
     from sklearn.datasets import make_blobs
-    X, Y = make_blobs(n_samples= 300 * 1000, n_features=15, centers=9, cluster_std=6.0)
+    X, Y = make_blobs(n_samples= 10000, n_features=15, centers=9, cluster_std=6.0)
     N, M = X.shape
-    return N, M, X.astype(np.float32), Y
+    return N, M, X.astype(np.float32), Y.astype(np.int32)
 
 def run_demo():
     #  The 60k train set of MNIST, reduced to 50 dimensions with PCA
     inflate_n_times = 1 # if > 1 : creates new observations by copying the original ones and adding noise
     
-    N, M, X, Y = fetch_MNIST(inflate_n_times) #  X.shape = (inflate_n_times*60k, 50)
+    # N, M, X, Y = fetch_MNIST(inflate_n_times) #  X.shape = (inflate_n_times*60k, 50)
     # N, M, X, Y = get_RNAseq()
     # N, M, X, Y = get_coil20()
+    N, M, X, Y = get_blobs()
 
     print("N = ", N, " M = ", M)
 
