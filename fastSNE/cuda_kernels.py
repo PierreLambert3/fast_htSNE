@@ -6,19 +6,11 @@ all_the_cuda_code = """
 // ---------------------------------  compiler-visible constants  -----------------------------------
 // --------------------------------------------------------------------------------------------------
 #define MAX_PERPLEXITY (80.0f)
-//#define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
 #define KHD ((((uint32_t)MAX_PERPLEXITY)* 3u / 32u + 1u) * 32u)
 #define KLD (32u * 1u) 
 #define N_CAND_LD (32u)
 #define N_CAND_HD (32u)
 #define N_INTERACTIONS_FAR (32u)
-
-/*
-#define N_CAND_HD (8u) <--- il faut faire N_cand beaucoup plus faible? vu que cand_R devient < 4 tres rapidement
-
-ca donne self.candidates_HD_generate_and_sort_euclidean_cu
---> probablement le strided index: esssayer  avec indices directs
-*/
 
 __global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kld, uint32_t* n_cand_ld, uint32_t* n_cand_hd, uint32_t* n_interactions_far){
     *max_perplexity = MAX_PERPLEXITY;
@@ -564,10 +556,6 @@ __device__ __forceinline__ void reduce1d_max_uint32_t(uint32_t* vector, uint32_t
 
 
 
-// ------------------------------------  max and permutations ------------------------------------
-
-
-
 // --------------------------------------------------------------------------------------------------
 // -------   non-overlapping random swaps: fast & helps the incremental sorting of the array   ------
 // --------------------------------------------------------------------------------------------------
@@ -764,7 +752,6 @@ __global__ void kernel_floatMaxReduction_one_step(float* input_vector, float* ou
             }
         }
     }
-    //smem_floatMaxReduction_one_step[i_local] = input_vector[idx];
     smem_floatMaxReduction_one_step[i_local] = input_vector[globalmem_idx];
     //smem_floatMaxReduction_one_step[i_local] = (i_global < input_size) ? input_vector[i_global] : input_vector[input_size-1];
     __syncthreads();
@@ -982,17 +969,12 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
             float xj2_m = Xj2[m];
             grad2 = grad_prefix_2 * (xi_m - xj2_m);
         }
-
-        /*
-        2/ faire tryptic
-        */
-
         gradients_khds[khd] = grad1 + grad2;
         reduce1d_sum_float(gradients_khds, KHD, khd); // sum the gradients along the KHD dimension to collapse KLD on each i
         // update other's grad_acc and khd grad_acc (more or less non-conflicting accesses)
         atomicAdd(&grad_acc_global[j_1 * Mld + m], grad1);
         if(has_other){
-            atomicAdd(&grad_acc_global[j_2 * Mld + m], grad2); // needs to be of opposite sign to the one in is_main
+            atomicAdd(&grad_acc_global[j_2 * Mld + m], grad2);
         }
         if(is_main){
             atomicAdd(&grad_acc_global[obs_i_global * Mld + m], -gradients_khds[0]);

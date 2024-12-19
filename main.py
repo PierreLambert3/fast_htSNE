@@ -8,7 +8,7 @@ import fastSNE.fastSNE as fastSNE
 # set the random seed
 # np.random.seed(42)
 
-def fetch_dataset():
+def fetch_MNIST(atrificially_inflate_n_times=1):
 
     # binary dump from a C flattened array of floats (32bits)
     mnist_binaries_path = r"C:\Users\pierr\dev\datasets\bin\mnist"
@@ -30,12 +30,11 @@ def fetch_dataset():
     # return N, M, X, Y.astype(np.int32)
 
     # allocate new dataset
-    n_times_larger = 1
-    N_new = N * n_times_larger
+    N_new = N * atrificially_inflate_n_times
     X_new = np.zeros((N_new, M), dtype=np.float32)
     Y_new = np.zeros((N_new, 1), dtype=np.float32)
     perms = np.random.permutation(N)
-    for i in range(n_times_larger):
+    for i in range(atrificially_inflate_n_times):
         X_new[i*N:(i+1)*N, :] = X[perms, :]
         Y_new[i*N:(i+1)*N, :] = Y[perms, :]
 
@@ -48,11 +47,6 @@ def fetch_dataset():
     X_new += np.random.normal(0, 5.0, X_new.shape)
 
     return N_new, M, X_new, Y_new.astype(np.int32)
-
-# now do explode button and hirizontal lr mult 
-
-
-
 
 def load_zfish_timeLabels():
     X = np.load("datasets/zfish/zfish_X.npy")
@@ -111,60 +105,28 @@ def get_coil20():
     X, Y = mat['X'], mat['Y']
     Y = (Y.astype(int) - 1).reshape((-1,))
     N, M = X.shape
-    return N, M, X.astype(np.float32), Y
+    return N, M, X.astype(np.float32), Y.astype(np.int32)
 
 def get_blobs():
     from sklearn.datasets import make_blobs
-    X, Y = make_blobs(n_samples= 300 * 1000, n_features=20, centers=9, cluster_std=5.0)
+    X, Y = make_blobs(n_samples= 300 * 1000, n_features=15, centers=9, cluster_std=6.0)
     N, M = X.shape
     return N, M, X.astype(np.float32), Y
 
 def run_demo():
-
-   
-    # fetch the dataset
-    # N, M, X, Y = fetch_dataset()
-    # N, M, X, Y = load_zfish_classif()
-    # N, M, X, Y = load_zfish_timeLabels()
-    N, M, X, Y = get_RNAseq()
+    #  The 60k train set of MNIST, reduced to 50 dimensions with PCA
+    inflate_n_times = 1 # if > 1 : creates new observations by copying the original ones and adding noise
+    
+    N, M, X, Y = fetch_MNIST(inflate_n_times) #  X.shape = (inflate_n_times*60k, 50)
+    # N, M, X, Y = get_RNAseq()
     # N, M, X, Y = get_coil20()
-    # N, M, X, Y = get_blobs()
 
+    print("N = ", N, " M = ", M)
 
-    """ print("unique labels", np.unique(Y))
-
-    print("N, M, X, Y", N, M, X.shape, Y.shape)
-    # do 2d pca
-    import matplotlib.pyplot as plt
-    from sklearn.decomposition import PCA
-    X2d = PCA(n_components=2).fit_transform(X)
-    plt.scatter(X2d[:, 0], X2d[:, 1], c=Y)
-    plt.show()
-    1/0 """
-
-
-
-    """  #do pca of X
-    from sklearn.decomposition import PCA
-    X2 = PCA(n_components=2).fit_transform(X)
-    plt.scatter(X2[:, 0], X2[:, 1], c=Y)
-    plt.show()
-    1/0 """
-
-    with_GUI = True 
-    tsne = fastSNE.fastSNE(with_GUI, n_components=2, random_state=None)
-    if with_GUI:
-        tsne.fit(N, M, X, Y)
-    else:
-        tsne.fit(N, M, X, Y=None)
-    Xld = tsne.transform()
-
-    """ # save the results
-    plt.scatter(Xld[:, 0], Xld[:, 1])
-    plt.savefig('tsne_plot.png')  """
+    tsne = fastSNE.fastSNE(n_components=2, random_state=None)
+    Xld = tsne.fit(N, M, X, Y).transform()
 
     return 42
 
 if __name__ == '__main__':
     run_demo()
-    print("program ended")
