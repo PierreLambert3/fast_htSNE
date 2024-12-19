@@ -80,6 +80,15 @@ class MaxGpu:
                 self.lvl4_ = gpuarray.to_gpu(np.zeros(shapes.grid_x_size, dtype=dtype))
         self.resultArr_async = np.zeros((1,), dtype=dtype)
     
+    def free(self):
+        try:
+            self.lvl1_.free()
+            self.lvl2_.free()
+            self.lvl3_.free()
+            self.lvl4_.free()
+        except:
+            pass
+    
     def get(self): # this supposes taht a stream sync was done between the last async copy and this get 
         return self.resultArr_async[0]
 
@@ -161,6 +170,15 @@ class MinGpu:
     
     def get(self): # this supposes taht a stream sync was done between the last async copy and this get 
         return self.resultArr_async[0]
+    
+    def free(self):
+        try:
+            self.lvl1_.free()
+            self.lvl2_.free()
+            self.lvl3_.free()
+            self.lvl4_.free()
+        except:
+            pass
 
     def async_reduce_this(self, gpu_array_to_reduce, stream):
         # copy the array to reduce to the lvl1_ array
@@ -246,6 +264,15 @@ class SumGpu:
     def get(self): # this supposes taht a stream sync was done between the last async copy and this get 
         return self.resultArr_async[0]
     
+    def free(self):
+        try:
+            self.lvl1_.free()
+            self.lvl2_.free()
+            self.lvl3_.free()
+            self.lvl4_.free()
+        except:
+            pass
+
     def async_reduce_this(self, gpu_array_to_reduce, stream):
         # copy the array to reduce to the lvl1_ array
         cuda.memcpy_dtod_async(self.lvl1_.gpudata, gpu_array_to_reduce.gpudata, gpu_array_to_reduce.nbytes, stream)
@@ -406,7 +433,7 @@ class fastSNE:
         # result
         self.cpu_Xld  = None
 
-    def fit(self, N, M, Xhd, Y=None, early_exaggeration=2.0):
+    def fit(self, N, M, Xhd, Y=None, early_exaggeration=1.0):
         # sanitize the input: must be float32 for X, int32 for Y. Y must start at 0 and be ravelled
         if Xhd.dtype != np.float32:
             Xhd = Xhd.astype(np.float32)
@@ -529,6 +556,7 @@ class fastSNE:
 
         # things for HD similarities: ind. radii, Pasm, Psym, sumsPasym
         cuda_has_new_HD_neighs = gpuarray.to_gpu(np.ones(N, dtype=np.uint32)) # todo: make this a bool* or uint8_t*
+        cuda_has_new_HD_neighs_acc = gpuarray.to_gpu(np.zeros(N, dtype=np.uint32)) # todo: make this a bool* or uint8_t*
         cuda_invRadii_HD       = gpuarray.to_gpu(np.ones(N, dtype=np.float32)) # only used on update: no need of double buffering
         cuda_Pasm              = gpuarray.to_gpu(np.zeros((N, __Khd__), dtype=np.float32)) 
         cuda_Pasm_sums         = gpuarray.to_gpu(np.ones((N,), dtype=np.float32)) 
@@ -548,7 +576,6 @@ class fastSNE:
         cuda_farthest_dist_LD_B   = gpuarray.to_gpu(np.ones(N, dtype=np.float32))             # TODO: init this
         neighbours_sumSnorms_LD   = SumGpu(np.double, self.N, self.compiled_cuda_code, cuda.Device(__DEVICE_NUMBER__).get_attributes())
         randoms_sumSnorms_LD      = SumGpu(np.double, self.N, self.compiled_cuda_code, cuda.Device(__DEVICE_NUMBER__).get_attributes())
-        
         HD_n_new_neighs_sum       = SumGpu(np.uint32, self.N, self.compiled_cuda_code, cuda.Device(__DEVICE_NUMBER__).get_attributes())
         big_dictionary = {
             "cuda_Xhd"                : cuda_Xhd,
@@ -572,7 +599,7 @@ class fastSNE:
             "cuda_farthest_dist_LD_A" : cuda_farthest_dist_LD_A,
             "cuda_farthest_dist_LD_B" : cuda_farthest_dist_LD_B,
             "cuda_has_new_HD_neighs"  : cuda_has_new_HD_neighs,
-            "cuda_has_new_HD_neighs_acc" : cuda_has_new_HD_neighs,
+            "cuda_has_new_HD_neighs_acc" : cuda_has_new_HD_neighs_acc,
             "cuda_invRadii_HD"        : cuda_invRadii_HD,
             "cuda_Pasm"               : cuda_Pasm,
             "cuda_Pasm_sums"          : cuda_Pasm_sums,
@@ -583,15 +610,18 @@ class fastSNE:
         }
         self.periodic_1000 = 0
         # launch the tSNE optimisation
-        self.fit_with_gui(Y, big_dictionary)
+        self.cpu_Xld = self.fit_with_gui(Y, big_dictionary)
         self.Xhd = None
+        neighbours_sumSnorms_LD.free()
+        randoms_sumSnorms_LD.free()
+        HD_n_new_neighs_sum.free()
         self.is_fitted = True
+        return self
 
     def transform(self):
         if not self.is_fitted:
             raise Exception("fastSNE: transform() called before fit(), or fit failed crashingly")
-        # return self.cpu_Xld
-        return None
+        return self.cpu_Xld
 
     def fit_with_gui(self, Y, big_dictionary):
         # fetch from the big dictionary
@@ -633,19 +663,12 @@ class fastSNE:
         self.fill_all_sqdists_HD(cuda_Xhd, cuda_knn_HD_B, cuda_knn_HD_A, cuda_sqdists_HD_A, cuda_farthest_dist_HD_A, stream_neigh_HD)
         stream_neigh_HD.synchronize()
         stream_neigh_LD.synchronize()
-
-        # REMOVE THIS 
-        self.sumFarthest_dists_gpu = SumGpu(np.float32, self.N, self.compiled_cuda_code, cuda.Device(__DEVICE_NUMBER__).get_attributes())
-        # REMOVE THIS 
-
-
         # 1. configure the process launch mode 
         multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd and often annoying
 
         # 2. shared memory with GUI (on CPU)
         cpu_shared_mem      = shared_memory.SharedMemory(create=True, size=int(self.N * self.Mld * np.dtype(np.float32).itemsize))
         cpu_Xld_arr_on_smem = np.ndarray((self.N, self.Mld), dtype=np.float32, buffer=cpu_shared_mem.buf)
-
 
         # copy (GPU->CPU) cuda_Xld_true_A to shared memory
         cuda_Xld_true_A.get(cpu_Xld_arr_on_smem)
@@ -669,8 +692,9 @@ class fastSNE:
         explosion_please           = multiprocessing.Value('b', False) 
         save_please                = multiprocessing.Value('b', False)
         reset_please               = multiprocessing.Value('b', False)
+        force_new_vals             = multiprocessing.Value('b', False)
         # 3.3  Launching the GUI process proper
-        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem, Y, self.N, self.Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, save_please, reset_please, __MIN_PERPLEXITY__, __MAX_PERPLEXITY__, __MIN_KERNEL_ALPHA__, __MAX_KERNEL_ALPHA__, __MIN_ATTRACTION_MULTIPLIER__, __MAX_ATTRACTION_MULTIPLIER__))
+        process_gui = multiprocessing.Process(target=gui_worker, args=(cpu_shared_mem, Y, self.N, self.Mld, kernel_alpha, perplexity, attrac_mult, LR_shared, dist_metric, gui_closed, points_ready_for_rendering, points_rendering_finished, iteration, explosion_please, save_please, reset_please, force_new_vals, __MIN_PERPLEXITY__, __MAX_PERPLEXITY__, __MIN_KERNEL_ALPHA__, __MAX_KERNEL_ALPHA__, __MIN_ATTRACTION_MULTIPLIER__, __MAX_ATTRACTION_MULTIPLIER__))
         process_gui.start()
 
         self.flag_new_HD_neighs(cuda_has_new_HD_neighs, cuda_has_new_HD_neighs_acc, stream_neigh_HD)
@@ -679,7 +703,6 @@ class fastSNE:
         denominator_simi_LD     = np.float32(self.N * __Kld__ * 0.2)
 
         # 4.   Optimise until the GUI is closed
-        iter_since_explosion = 0
         iteration_int         = 0
         isPhaseA              = True
         gui_data_prep_phase   = 0
@@ -690,11 +713,9 @@ class fastSNE:
         import time
         tic = time.time()
         pct_new_HD_neighs = 1.0
-        warmup_len = 60
+        pure_neigh_explo_len = 100 # 
         grad_eps = 1e-4
         while not gui_was_closed:
-            if iter_since_explosion < 2:
-                iter_since_explosion += 1
             # ~~~~~~ pointers depending on phase ~~~~~~
             if isPhaseA:
                 read_Xld      = cuda_Xld_true_A
@@ -736,7 +757,6 @@ class fastSNE:
             save_request      = save_please.value
             if(explosion_request):
                 explosion_please.value = False
-                iter_since_explosion = 0
             if(save_request):
                 save_please.value = False
                 cpu_Xld = read_Xld.get()
@@ -761,24 +781,50 @@ class fastSNE:
             if reset_request:
                 self.reset_embedding(read_Xld, write_Xld, cuda_Xld_mmtm, stream_grads)
                 stream_grads.synchronize()
-            if explosion_request or iter_since_explosion < 2:
-                self.divide_by_2_embedding(read_Xld, write_Xld, cuda_Xld_mmtm, stream_grads)
+            if explosion_request:
+                self.implosion(read_Xld, write_Xld, cuda_Xld_mmtm, stream_grads)
                 stream_grads.synchronize()
             # ~~~~~~  perhaps recompute P  ~~~~~~ 
             update_Psym_this_iteration = HD_config_changed
-            if warmup and iteration_int >= warmup_len-3:
+            if warmup and iteration_int >= pure_neigh_explo_len-3:
                 self.flag_new_HD_neighs(cuda_has_new_HD_neighs, cuda_has_new_HD_neighs_acc, stream_neigh_HD)
                 update_Psym_this_iteration = True
-            if (iteration_int % 11) == 0:
+            if (iteration_int % 22) == 0:
                 update_Psym_this_iteration = True
             if update_Psym_this_iteration: # requires stream_neigh_HD and stream_grads to be synced
                 self.high_dim_filtered_updateHDstates_and_Psym(cuda_Xhd, knn_HD_read, sqdists_HD_read, farthest_dist_HD_read, cuda_has_new_HD_neighs_acc, cuda_invRadii_HD, cuda_Pasm, cuda_Pasm_sums, cuda_Psym, cuda_Psym_knn, stream_neigh_HD)
                 stream_neigh_HD.synchronize()
-            if iteration_int < 300:
-                exag = self.exaggeration
-                # TODO : perplexity starts high and diminishes (on GUI side). same for kernel alpha
-            else:
-                exag = 1.0
+            
+            start_phase_len = 250 + pure_neigh_explo_len
+            med_phase_len   = 250
+            end_phase_len   = 500
+            back_to_normal_params = start_phase_len+med_phase_len + 1 + end_phase_len
+            exag = 1.0
+            if iteration_int < back_to_normal_params:
+                ka = 20.0
+                am = 0.75
+                kernel_alpha.value = ka
+                attrac_mult.value  = am
+                force_new_vals.value = True
+                if iteration_int < 200 and (iteration_int % 10) == 0:
+                    explosion_please.value = True
+                if back_to_normal_params - 100 == iteration_int:
+                    explosion_please.value = True
+                """ if (iteration_int % 200) == 0:
+                    explosion_please.value = True """
+                if (iteration_int % 20) == 0:
+                    momenta_cpu = cuda_Xld_mmtm.get()
+                    momenta_cpu *= 2.0
+                    cuda_Xld_mmtm.set(momenta_cpu)
+            
+            if back_to_normal_params == iteration_int:
+                explosion_please.value = True
+                LR_shared.value    = 2.0
+                kernel_alpha.value = 1.0
+                attrac_mult.value  = 0.5
+                perplexity.value   = 35.0
+                with force_new_vals.get_lock():
+                    force_new_vals.value = True
             #  ~~~~~~ resync HD knn at each iteration, else some HD discovery works would be lost. ~~~~~~
             cuda.memcpy_dtod_async(knn_HD_write.gpudata, knn_HD_read.gpudata, knn_HD_read.nbytes, stream_neigh_HD)
             cuda.memcpy_dtod_async(sqdists_HD_write.gpudata, sqdists_HD_read.gpudata, sqdists_HD_read.nbytes, stream_neigh_HD)
@@ -793,24 +839,15 @@ class fastSNE:
             # ~~~~~~ get the sums on gpu of for LD simi denominator ~~~~~~
             random_sum = randoms_sumSnorms_LD.get()
             neighs_sum = neighbours_sumSnorms_LD.get()
-            # bigsum_hat = neighs_sum + random_sum * sums_rands_multiplier
-            # denominator_simi_LD = bigsum_hat
 
             n_samples_estim = self.N * (__Khd__ + __Khd__ + __N_INTERACTIONS_FAR__)
-            matrix_area = self.N * (self.N - 1)
+            matrix_area = self.N * (self.N - 1) #/ 2.0
             scaling_factor = matrix_area / n_samples_estim
             denominator_simi_LD = np.float32(scaling_factor * (random_sum + neighs_sum))
-
-            """ acc1 = (random_sum+neighs_sum) * (float) (self.N * self.N / 2) / (float)(self.N*(__Khd__+__Kld__+__N_INTERACTIONS_FAR__))
-            now_denominator_simi_LD = np.float32(acc1) 
-            now_denominator_simi_LD = np.float32(sums_rands_multiplier*random_sum + sums_neighs_multiplier*neighs_sum)
-            denominator_simi_LD = now_denominator_simi_LD
-            if denominator_simi_LD < 1e-10:
-                denominator_simi_LD = 1e-10 """
-            # print(denominator_simi_LD/1e6, "  <---   denominator_simi_LD/1e6   random_sum/1e6: ", random_sum/1e6, "  neighs_sum/1e6: ", neighs_sum/1e6, " iter: ", iteration_int)
+            print("pct_new_HD_neighs", pct_new_HD_neighs)
             # ~~~~~~ recompute all neigh dists on HD hparam change (else can break)  ~~~~~~ 
             pct_new_HD_neighs = float(HD_n_new_neighs_sum.get()) / float(self.N)
-            do_HDnnDescent = (iteration_int < warmup_len) or (not update_Psym_this_iteration)
+            do_HDnnDescent = (iteration_int < pure_neigh_explo_len) or (not update_Psym_this_iteration)
             if not do_HDnnDescent:
                 P_do = 0.1 + pct_new_HD_neighs * 0.9
                 do_HDnnDescent = np.random.rand() < P_do
@@ -849,42 +886,20 @@ class fastSNE:
             # ~~~~~~ iteration end ~~~~~~
             isPhaseA = not isPhaseA 
             iteration_int += 1
-            if warmup and iteration_int >= warmup_len:
+            if warmup and iteration_int >= pure_neigh_explo_len:
                 warmup = False
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
 
-
-            # if iteration_int >= warmup_len + 30:
-            #     with gui_closed.get_lock():
-            #         gui_closed.value = True
-
-            """
-            if iteration_int > 10 and (iteration_int % 10) == 0:
-                # print("-----  pct_new_HD_neighs: ",  np.round((pct_new_HD_neighs),2), "    iteration: ", iteration_int)
-                # testing, remove 
-                stream_grads.synchronize()
-                self.sumFarthest_dists_gpu.async_reduce_this(farthest_dist_HD_read, stream_grads)
-                stream_grads.synchronize()
-                mean_farthest_distHD = np.sqrt(float(self.sumFarthest_dists_gpu.get()) / float(self.N))
-                if iteration_int < 2:
-                    farthest_dists_sum_EMA = mean_farthest_distHD
-                ema_alpha = 0.5
-                farthest_dists_sum_EMA = (1.0-ema_alpha) * farthest_dists_sum_EMA + ema_alpha * mean_farthest_distHD
-                stream_grads.synchronize()
-                print("mean farD: ", np.round(mean_farthest_distHD, 4), " diff_v_EMA: ", np.round(mean_farthest_distHD - farthest_dists_sum_EMA, 2), "    pct_new_HD_neighs: ", np.round((pct_new_HD_neighs),4), "  i:", iteration_int)
-                stream_grads.synchronize()
-                # testing remove
-                # if(iteration_int  >= 1000):
-                #     tac = time.time()
-                #     print("time elapsed: ", tac - tic)
-                #     return
-            """
-
+        Xld_cpu = read_Xld.get()
         process_gui.join()
         cpu_shared_mem.unlink()
-        self.free_all_GPU_memory(cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm)
-        return
+        cuda_Xld_temp_Xld.gpudata.free()
+        self.free_all_GPU_memory(big_dictionary)
+
+        self.gui_Xld_minFinder.free()
+        self.gui_Xld_maxFinder.free()
+        return Xld_cpu
     
     # all CUDA 'kernels' run in parallel, sync at the start of the iterations loop outside of this function
     def one_iteration(self, lr_multiplier, dist_type, exag, warmup, do_HDnnDescent, grad_acc_global, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write,\
@@ -1006,7 +1021,6 @@ class fastSNE:
         # repulsion_multiplier = np.float32(1.0 / self.attrac_mult)    
         repulsion_multiplier = np.float32(1.0 - self.attrac_mult)    
             
-        # lr = np.float32(self.N) * 0.05
         lr = np.float32(self.N) * 0.1 * lr_multiplier
         # 1. nesterov parameters
         block_shape  = self.Kshapes_transpose.block_x, self.Kshapes_transpose.block_y, 1
@@ -1031,20 +1045,16 @@ class fastSNE:
         randoms_sumSnorms_LD.async_reduce(stream=stream_grads)
         neighbours_sumSnorms_LD.async_reduce(stream=stream_grads)
 
-        # randoms_sumSnorms_LD, neighbours_sumSnorms_LD
-        # cuda.memcpy_dtod_async(self.lvl1_.gpudata, gpu_array_to_reduce.gpudata, gpu_array_to_reduce.nbytes, stream)
-
-    def divide_by_2_embedding(self, read_Xld, write_Xld, cuda_Xld_mmtm, stream_grads):
+    def implosion(self, read_Xld, write_Xld, cuda_Xld_mmtm, stream_grads):
         stream_grads.synchronize()
-        alpha = 0.05
+        factor  = 1.0 / 100.0
         cpu_xld = read_Xld.get()
-        cpu_xld = cpu_xld * alpha
+        cpu_xld = cpu_xld * factor
         write_Xld.set_async(cpu_xld, stream=stream_grads)
         read_Xld.set_async(cpu_xld, stream=stream_grads)
         momentum_cpu = cuda_Xld_mmtm.get()
-        momentum_cpu = momentum_cpu * alpha
+        momentum_cpu = momentum_cpu * 0.0
         cuda_Xld_mmtm.set_async(momentum_cpu, stream=stream_grads)
-        #sync 
         stream_grads.synchronize()
 
     def reset_embedding(self, read_Xld, write_Xld, cuda_Xld_mmtm, stream_grads):
@@ -1069,7 +1079,6 @@ class fastSNE:
         cuda_device = cuda.Device(device_number)
         cuda_device_attributes = cuda_device.get_attributes()
 
-        # ------------ 0. kernels used for getting the transpose of Xld  -------
         n_threads   = N * Mld
         multiple_of = 32 if n_threads > 32 else 1
         block_x     = Mld
@@ -1077,8 +1086,6 @@ class fastSNE:
         smem_n_float_per_y = 0
         smem_n_float_const = 0
         self.Kshapes_transpose = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
-       
-        # ------------ 2. kernels used for neighboru related things -------
         #   N threads
         n_threads = N
         multiple_of = 32 if n_threads > 32 else 1
@@ -1099,7 +1106,6 @@ class fastSNE:
         smem_n_float_per_y = Mhd + 1
         smem_n_float_const = 0
         self.Kshapes2d_NxKhd_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
-
         #  N x __N_CAND_LD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_LD__
         block_x     = __N_CAND_LD__
@@ -1107,7 +1113,6 @@ class fastSNE:
         smem_n_float_per_y = Mld + 1
         smem_n_float_const = 0
         self.Kshapes2d_NxNcandLD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
-
         #  N x __N_CAND_HD__ threads, 1d grid, 2d block
         n_threads   = N * __N_CAND_HD__
         block_x     = __N_CAND_HD__
@@ -1116,15 +1121,10 @@ class fastSNE:
         smem_n_float_const = 0
         self.Kshapes2d_NxNcandHD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
         
-
-    def free_all_GPU_memory(self, cuda_Xhd, cuda_Xld_true_A, cuda_Xld_true_B, cuda_Xld_nest, cuda_Xld_mmtm):
-        # cuda_context.pop() # not needed if pycuda.autoinit is used
-        cuda_Xhd.gpudata.free()
-        cuda_Xld_true_A.gpudata.free()
-        cuda_Xld_true_B.gpudata.free()
-        cuda_Xld_nest.gpudata.free()
-        cuda_Xld_mmtm.gpudata.free()
-        raise Exception("here need to free all CUDA ressources!!")
+    def free_all_GPU_memory(self, big_dic):
+        for key, value in big_dic.items():
+            if isinstance(value, gpuarray.GPUArray):
+                value.gpudata.free()
 
     def fetch_constants_from_cuda(self):
         global __MAX_PERPLEXITY__, __Khd__, __Kld__, __N_CAND_LD__, __N_CAND_HD__, __N_INTERACTIONS_FAR__

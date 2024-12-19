@@ -554,8 +554,6 @@ __device__ __forceinline__ void reduce1d_max_uint32_t(uint32_t* vector, uint32_t
     __syncthreads();
 }
 
-
-
 // --------------------------------------------------------------------------------------------------
 // -------   non-overlapping random swaps: fast & helps the incremental sorting of the array   ------
 // --------------------------------------------------------------------------------------------------
@@ -605,7 +603,7 @@ __device__ __forceinline__ void magicSwaps_local(float* vector, uint32_t* perms,
     }
 }
 
-// the seed MUST be assured to be significantly smaller than max_uint32_t else overflow is possible
+// the seed MUST be assured to be significantly smaller than max_uint32_t else overflow is possible (but it's not a big deal because uints wrap around)
 __device__ __forceinline__ void magicSwaps_global(float* vector, uint32_t* perms, uint32_t k, uint32_t _K_, bool k_divisible_by_2, uint32_t seed){
     __syncthreads();
     if(k_divisible_by_2){ 
@@ -694,7 +692,7 @@ __device__ __forceinline__ void magicSwaps_local_ascending(float* vector, uint32
     __syncthreads();
 }
 
-// the seed MUST be assured to be significantly smaller than max_uint32_t else overflow is possible
+// the seed MUST be assured to be significantly smaller than max_uint32_t else overflow is possible (but it's not a big deal because uints wrap around)
 __device__ __forceinline__ void magicSwaps_global_ascending(float* vector, uint32_t* perms, uint32_t k, uint32_t _K_, bool k_divisible_by_2, uint32_t seed){
     __syncthreads();
     if(k_divisible_by_2){ 
@@ -735,8 +733,6 @@ __device__ __forceinline__ void magicSwaps_global_ascending(float* vector, uint3
         }
     }
 }
-
-
 
 __global__ void kernel_floatMaxReduction_one_step(float* input_vector, float* output_vector, uint32_t input_size){
     extern __shared__ float smem_floatMaxReduction_one_step[];
@@ -782,8 +778,6 @@ __global__ void kernel_floatMinReduction_one_step(float* input_vector, float* ou
         output_vector[blockIdx.x] = smem_floatMinReduction_one_step[0];
     }
 }
-
-
 
 __global__ void kernel_floatSumReduction_one_step(float* input_vector, float* output_vector, uint32_t input_size){
     extern __shared__ float smem_floatSumReduction_one_step[];
@@ -879,8 +873,7 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
 
     // ~~~~~~~~ 1.1    j1 (HD neighbour)   ~~~~~~~~
     Xj1 = &X_nest[j_1 * Mld];
-    float sq_eucl1 = squared_euclidean_distance(Xi_ld, Xj1, Mld);
-
+    float sq_eucl1 = squared_euclidean_distance(Xi_ld, Xj1, Mld); // slow, this is the bottleneck
     wij1 = 1.0f / __powf(1.0f + sq_eucl1/cauchy_alpha, cauchy_alpha);
     qij1 = wij1 / denominatorLD;
     
@@ -891,7 +884,6 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
     if(has_other){
         Xj2 = &X_nest[j_2 * Mld];
         sq_eucl2 = squared_euclidean_distance(Xi_ld, Xj2, Mld);
-
         wij2 = 1.0f / __powf(1.0f + sq_eucl2/cauchy_alpha, cauchy_alpha);
         qij2 = wij2 / denominatorLD;
         smem_KLD_then_FAR[khd] = wij2;
@@ -1134,14 +1126,14 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     }
 
     float perplexity_now = 0.0f;
-    if(target_perplexity < 0.1f){
-        target_perplexity = 0.1f;}
+    if(target_perplexity < 2.0f){
+        target_perplexity = 2.0f;}
     float PP_tol = 0.01f*target_perplexity;
     if(PP_tol < 0.05){
         PP_tol = 0.05;}
 
-    float max_entropy = __logf(target_perplexity + PP_tol);
-    float min_entropy = __logf(target_perplexity - PP_tol);
+    float max_entropy     = __logf(target_perplexity + PP_tol);
+    float min_entropy     = __logf(target_perplexity - PP_tol);
     float desired_entropy = __logf(target_perplexity);
 
     // ~~~~~~~~ shared memory  ~~~~~~~~
@@ -1177,6 +1169,12 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         bool iter_limit_reached = false;
         while(!direction_changed && !H_ok && !iter_limit_reached){
             iter_stretch++;
+            if(multiplier > 1.8f){ // lets tamper the exponential growth to be safe
+                multiplier = 1.8f;
+            }
+            if(multiplier < 0.5f){
+                multiplier = 0.5f;
+            }
             if(grow){
                 L_ivRad = ivRad;
                 R_ivRad = ivRad * multiplier;
@@ -1810,10 +1808,6 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
         __syncthreads();
         uint32_t working_j = cand_idxs[working_cand_nb];
 
-
-        
-
-
         // collision within candidates
         uint32_t collision_cand = 0u;
         if(cand_number < cand_R){
@@ -2105,8 +2099,6 @@ __global__ void compute_all_HD_sqdists_manhattan(uint32_t N, uint32_t Mhd, float
     if(is_0_thread){ // k=0 contains the furthest dist after  reduction
         farthest_dist_HD_write[obs_i_global] = sq_eucl;
     }
-
-
     return;
 }
 __global__ void compute_all_HD_sqdists_cosine(uint32_t N, uint32_t Mhd, float* Xhd, uint32_t* knn_HD_read, uint32_t* knn_HD_write, float* sqdists_HD_write, float* farthest_dist_HD_write, uint32_t seed){
@@ -2329,6 +2321,7 @@ __global__ void kernel_update_EMA_LD(float* mins_EMA, float* maxs_EMA, float* mi
     uint32_t obs_i_global   = obs_i_in_block + blockIdx.x * n_obs_in_block;
     uint32_t m              = threadIdx.x; 
     if (obs_i_global > 0 || m >= M) { return; }
+    // float momentum = 0.9f;
     float momentum = 0.9f;
     float min_val = mins[m];
     float max_val = maxs[m];
