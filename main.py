@@ -126,6 +126,10 @@ def run_demo():
     tsne = fastSNE.fastSNE(n_components=2, random_state=None)
     Xld = tsne.fit(N, M, X, Y).transform()
 
+    """ from matplotlib import pyplot as plt
+    plt.scatter(Xld[:, 0], Xld[:, 1], c=Y, s=0.4)
+    plt.show() """
+
     return 42
 
 if __name__ == '__main__':
