@@ -369,7 +369,7 @@ class ModernGLWindow(pyglet.window.Window):
 
     def retrieve_and_prepare_data(self):
         if(self.Mld == 2):
-            self.cpu_Xld *= 0.5
+            # self.cpu_Xld *= 0.5
             self.vbo_positions.write(self.cpu_Xld.astype('f4').tobytes())
         elif (self.Mld == 3):
             self.Xld_longer[:self.N]         = (self.cpu_Xld[:, :2] * 0.45) - 0.3
@@ -391,8 +391,6 @@ class ModernGLWindow(pyglet.window.Window):
             self.vbo_positions.write(self.Xld_longer.astype('f4').tobytes())
             
     def update(self, dt):
-        
-
         # only draw if the points were updated
         with self.points_ready_for_rendering.get_lock():
             points_ready = self.points_ready_for_rendering.value

@@ -11,7 +11,7 @@ import fastSNE.fastSNE as fastSNE
 def fetch_MNIST(atrificially_inflate_n_times=1):
 
     # binary dump from a C flattened array of floats (32bits)
-    mnist_binaries_path = r"C:\Users\pierr\dev\datasets\bin\mnist"
+    mnist_binaries_path = r"C:\Users\pierr\dev\datasets\MNIST_50PC"
     mnist_X_filename = mnist_binaries_path + r"\MNIST_PCA_X.bin"
     mnist_Y_filename = mnist_binaries_path + r"\MNIST_PCA_Y.bin"
     N = 60*1000
@@ -101,23 +101,143 @@ def get_coil20():
 
 def get_blobs():
     from sklearn.datasets import make_blobs
-    X, Y = make_blobs(n_samples= 10000, n_features=15, centers=9, cluster_std=6.0)
+    X, Y = make_blobs(n_samples= 20000, n_features=64, centers=18, cluster_std=6.0, center_box=(-10.0, 10.0), shuffle=True)
     N, M = X.shape
     return N, M, X.astype(np.float32), Y.astype(np.int32)
+
+import time
+def umap_embedding(X, Y):
+    import umap.umap_ as umap
+    start = time.time()
+    reducer = umap.UMAP(n_components=2)
+    reducer.fit(X)
+    embedding = reducer.transform(X)
+    print("UMAP took ", time.time() - start, " seconds")
+    neighbours = reducer.nearest_neighbors_.idx
+    return embedding, neighbours
+
+def get_umap_neighbours(X, k):
+    # umap.umap_.nearest_neighbors(X, n_neighbors, metric, metric_kwds, angular, random_state, low_memory=True, use_pynndescent=True, n_jobs=-1, verbose=False)
+    import umap.umap_ as umap
+    start = time.time()
+    knn = umap.nearest_neighbors(X, k+1, metric='euclidean', metric_kwds={}, angular=False, random_state=None)[0][:, 1:]
+    time_taken = time.time() - start
+    return knn, time_taken
+
+def sort_neighbors_by_distance(X, approx_knn):
+    """Sort approximate neighbors by distance for each point"""
+    import numpy as np
+    N, k = approx_knn.shape
+    
+    # Calculate distances to neighbors
+    distances = np.zeros((N, k))
+    for i in range(N):
+        point = X[i]
+        neighbors = X[approx_knn[i]]
+        distances[i] = np.sum((neighbors - point[None, :]) ** 2, axis=1)
+    
+    # Sort neighbors by distance
+    sort_idx = np.argsort(distances, axis=1)
+    sorted_knn = np.zeros_like(approx_knn)
+    for i in range(N):
+        sorted_knn[i] = approx_knn[i][sort_idx[i]]
+    
+    return sorted_knn
+
+def evaluate_neighbors_quality_fast(X, approx_knn_umap, approx_knn_mine, k, n_samples=10000):
+    approx_knn_umap = sort_neighbors_by_distance(X, approx_knn_umap)
+    approx_knn_umap = approx_knn_umap[:, :k]
+    approx_knn_mine = sort_neighbors_by_distance(X, approx_knn_mine)
+    approx_knn_mine = approx_knn_mine[:, :k]
+    from sklearn.neighbors import NearestNeighbors
+    import numpy as np
+    
+    # 1. Sample points
+    n_total = X.shape[0]
+    sample_idx = np.random.choice(n_total, size=n_samples, replace=False)
+    
+    # 2. Get ground truth for sampled points (k+1 to account for self)
+    nbrs = NearestNeighbors(n_neighbors=k+1, algorithm='brute').fit(X)
+    _, true_indices = nbrs.kneighbors(X[sample_idx])
+    true_indices = true_indices[:, 1:]
+    
+    # 3. Get UMAP neighbors for sampled points
+    umap_indices = approx_knn_umap[sample_idx]
+    mine_indices = approx_knn_mine[sample_idx]
+    
+    # 4-7. Compute intersection scores at each scale
+    scale_scores_umap = []
+    scale_scores_mine = []
+    for h in range(1, k):
+        intersections_umap = []
+        intersections_mine = []
+        for i in range(n_samples):
+            true_set = set(true_indices[i, :h])
+            umap_set = set(umap_indices[i, :h])
+            overlap = len(true_set.intersection(umap_set))
+            intersections_umap.append(overlap / h)  # normalize by scale
+            mine_set = set(mine_indices[i, :h])
+            overlap = len(true_set.intersection(mine_set))
+            intersections_mine.append(overlap / h)
+            
+        scale_scores_umap.append(np.mean(intersections_umap))
+        scale_scores_mine.append(np.mean(intersections_mine))
+    
+    # Visualize
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(8, 6))
+    plt.plot(range(1, k), scale_scores_umap, '-', label='UMAP', color='red')
+    plt.plot(range(1, k), scale_scores_mine, '-', label='Mine', color='blue')
+    plt.xlabel('Scale (h)')
+    plt.ylabel('Mean Intersection Score')
+    plt.title('KNN Quality vs Scale')
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+    """ plt.plot(range(1, k), scale_scores, '-o')
+    plt.xlabel('Scale (h)')
+    plt.ylabel('Mean Intersection Score')
+    plt.title('KNN Quality vs Scale')
+    plt.grid(True)
+    plt.show() """
+    
+    # return scale_scores
 
 def run_demo():
     #  The 60k train set of MNIST, reduced to 50 dimensions with PCA
     inflate_n_times = 1 # if > 1 : creates new observations by copying the original ones and adding noise
     
-    # N, M, X, Y = fetch_MNIST(inflate_n_times) #  X.shape = (inflate_n_times*60k, 50)
+    N, M, X, Y = fetch_MNIST(inflate_n_times) #  X.shape = (inflate_n_times*60k, 50)
     # N, M, X, Y = get_RNAseq()
     # N, M, X, Y = get_coil20()
-    N, M, X, Y = get_blobs()
+    # N, M, X, Y = get_blobs()
 
-    print("N = ", N, " M = ", M)
+
+    k = 256
+
+    # umap_Xld, umap_KNN = umap_embedding(X, Y)
+    """ k = 15
+    umap_KNN = get_umap_neighbours(X, k+1)
+    # umap_KNN = np.random.randint(0, N, (N, k))
+    print(umap_KNN)
+    print()
+    scores = evaluate_neighbors_quality_fast(X, umap_KNN, n_samples=10000)
+    print(scores) """
+
+    """ 
+    1/0
+
+    # resultats a montrer : 
+    # SNE, tSNE PP=5, tSNE PP=60, UMAP, htSNE
+
+    print("N = ", N, " M = ", M) """
 
     tsne = fastSNE.fastSNE(n_components=2, random_state=None)
-    Xld = tsne.fit(N, M, X, Y).transform()
+    # knn_umap, time_taken = get_umap_neighbours(X, k)
+    time_taken = None
+    Xld, knn_mine = tsne.fit(N, M, X, Y, max_n_sec=time_taken).transform()
+    # scores = evaluate_neighbors_quality_fast(X, knn_umap, knn_mine, k, n_samples=5000)
+    scores = evaluate_neighbors_quality_fast(X, knn_mine, knn_mine, k, n_samples=5000)
 
     """ from matplotlib import pyplot as plt
     plt.scatter(Xld[:, 0], Xld[:, 1], c=Y, s=0.4)

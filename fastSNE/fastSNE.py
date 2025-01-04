@@ -433,7 +433,7 @@ class fastSNE:
         # result
         self.cpu_Xld  = None
 
-    def fit(self, N, M, Xhd, Y=None, early_exaggeration=1.0):
+    def fit(self, N, M, Xhd, Y=None, early_exaggeration=1.0, max_n_sec=None):
         # sanitize the input: must be float32 for X, int32 for Y. Y must start at 0 and be ravelled
         if Xhd.dtype != np.float32:
             Xhd = Xhd.astype(np.float32)
@@ -610,7 +610,8 @@ class fastSNE:
         }
         self.periodic_1000 = 0
         # launch the tSNE optimisation
-        self.cpu_Xld = self.fit_with_gui(Y, big_dictionary)
+        self.cpu_Xld = self.fit_with_gui(Y, big_dictionary, max_n_sec=max_n_sec)
+        
         self.Xhd = None
         neighbours_sumSnorms_LD.free()
         randoms_sumSnorms_LD.free()
@@ -623,7 +624,9 @@ class fastSNE:
             raise Exception("fastSNE: transform() called before fit(), or fit failed crashingly")
         return self.cpu_Xld
 
-    def fit_with_gui(self, Y, big_dictionary):
+    def fit_with_gui(self, Y, big_dictionary, max_n_sec=None):
+        if max_n_sec is None:
+            max_n_sec = 1e9
         # fetch from the big dictionary
         cuda_Xhd, cuda_Xld_mmtm, cuda_Xld_nest = [big_dictionary[key] for key in ["cuda_Xhd", "cuda_Xld_mmtm", "cuda_Xld_nest"]] 
         cuda_knn_HD_A, cuda_sqdists_HD_A, cuda_farthest_dist_HD_A, cuda_Xld_true_A = [big_dictionary[key] for key in ["cuda_knn_HD_A", "cuda_sqdists_HD_A", "cuda_farthest_dist_HD_A", "cuda_Xld_true_A"]]
@@ -664,7 +667,11 @@ class fastSNE:
         stream_neigh_HD.synchronize()
         stream_neigh_LD.synchronize()
         # 1. configure the process launch mode 
-        multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd and often annoying
+        # multiprocessing.set_start_method('spawn') # this is crucial for the GUI to work correctly. Python is wierd and often annoying
+        try:
+            multiprocessing.set_start_method('spawn')
+        except RuntimeError:
+            pass
 
         # 2. shared memory with GUI (on CPU)
         cpu_shared_mem      = shared_memory.SharedMemory(create=True, size=int(self.N * self.Mld * np.dtype(np.float32).itemsize))
@@ -713,9 +720,14 @@ class fastSNE:
         import time
         tic = time.time()
         pct_new_HD_neighs = 1.0
+        ema_pct_new_HD_neighs = 1.0
         pure_neigh_explo_len = 100 # 
         grad_eps = 1e-4
+        import time
+        tic = time.time()
+        elapsed = 0
         while not gui_was_closed:
+            
             # ~~~~~~ pointers depending on phase ~~~~~~
             if isPhaseA:
                 read_Xld      = cuda_Xld_true_A
@@ -844,9 +856,12 @@ class fastSNE:
             matrix_area = self.N * (self.N - 1) #/ 2.0
             scaling_factor = matrix_area / n_samples_estim
             denominator_simi_LD = np.float32(scaling_factor * (random_sum + neighs_sum))
-            print("pct_new_HD_neighs", pct_new_HD_neighs)
+            # print("pct_new_HD_neighs", pct_new_HD_neighs)
             # ~~~~~~ recompute all neigh dists on HD hparam change (else can break)  ~~~~~~ 
             pct_new_HD_neighs = float(HD_n_new_neighs_sum.get()) / float(self.N)
+            ema_pct_new_HD_neighs = 0.95 * ema_pct_new_HD_neighs + 0.05 * pct_new_HD_neighs
+            if iteration_int % 10 == 0:
+                print(f"\rpct HD new neighs {np.round(ema_pct_new_HD_neighs, 3)}", end="     ")
             do_HDnnDescent = (iteration_int < pure_neigh_explo_len) or (not update_Psym_this_iteration)
             if not do_HDnnDescent:
                 P_do = 0.1 + pct_new_HD_neighs * 0.9
@@ -888,18 +903,32 @@ class fastSNE:
             iteration_int += 1
             if warmup and iteration_int >= pure_neigh_explo_len:
                 warmup = False
+            elapsed = time.time() - tic
+            if elapsed > max_n_sec:
+                gui_closed.value = True
             with gui_closed.get_lock():
                 gui_was_closed = gui_closed.value
 
         Xld_cpu = read_Xld.get()
         process_gui.join()
+
+
+        self.cpu_knn_HD = knn_HD_read.get()
+        print("KNN HD : ", self.cpu_knn_HD)
+        print("KNN HD : ", self.cpu_knn_HD.shape)
+        return Xld_cpu, self.cpu_knn_HD
+
         cpu_shared_mem.unlink()
         cuda_Xld_temp_Xld.gpudata.free()
-        self.free_all_GPU_memory(big_dictionary)
+        self.free_all_GPU_memory(big_dictionary, knn_HD = knn_HD_read)
 
         self.gui_Xld_minFinder.free()
         self.gui_Xld_maxFinder.free()
-        return Xld_cpu
+
+        print("KNN HD : ", self.cpu_knn_HD)
+        print("KNN HD : ", self.cpu_knn_HD.shape)
+
+        return Xld_cpu, self.cpu_knn_HD
     
     # all CUDA 'kernels' run in parallel, sync at the start of the iterations loop outside of this function
     def one_iteration(self, lr_multiplier, dist_type, exag, warmup, do_HDnnDescent, grad_acc_global, Xhd, read_Xld, write_Xld, Xld_nest, Xld_mmtm, knn_HD_read, knn_HD_write, sqdists_HD_read, sqdists_HD_write,\
@@ -1130,7 +1159,8 @@ class fastSNE:
         smem_n_float_const = 0
         self.Kshapes2d_NxNcandHD_threads = Kernel_shapes_2dBlocks(n_threads, block_x, smem_n_float32_per_thread, cuda_device_attributes, smem_n_float_const, smem_n_float_per_y)
         
-    def free_all_GPU_memory(self, big_dic):
+    def free_all_GPU_memory(self, big_dic, knn_HD):
+        self.cpu_knn_HD = knn_HD
         for key, value in big_dic.items():
             if isinstance(value, gpuarray.GPUArray):
                 value.gpudata.free()

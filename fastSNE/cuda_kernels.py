@@ -2341,10 +2341,10 @@ __global__ void kernel_scale_X(float* X_in, float* X_out, float min_val, float m
     uint32_t m              = threadIdx.x; 
     if (obs_i_global >= N || m >= M) { return; }
 
-    // scale the data: (-0.75 to 0.75)  and shift the data (y min = -1.0)
+    // scale the data:  and shift the data (y min = -1.0)
     float value   = X_in[obs_i_global*M + m];
     float scaled  = (value - min_val) / (max_val - min_val);
-    scaled = ((scaled - 0.5f) * 2.0f) * 0.75f;
+    scaled = ((scaled - 0.5f) * 2.0f) * 0.85f;
     
 
 
