@@ -163,7 +163,7 @@ def run_demo():
 
     # 5. example usage for a dataset with the properties of "blob": need to do high attraction and high LD kernel alpha (ie: low tails: closer to SNE that the Student-t verions)
     # Often, if you want to exxagerate the separation between the clusters, you will want to exxagerate the by-design discrepancy between the kernel tails in HD (gaussian, adaptive to the local density), and those in LD (no local adaptaion, bu tunable tail heaviness);
-    # having heavier tails (low "kernel alpha") would encourage h-t-SNE to tear the manifold in weak zones (low density) and exxagerate the sepâration of distinct cluster, facilitating visualisation.
+    # having heavier tails (low "kernel alpha") would encourage h-t-SNE to tear the manifold in weak zones (low density) and exxagerate the separation of distinct cluster, facilitating visualisation.
     # However, on some rare datasets such as blobs, having heavy tails in LD (low "kernel alpha") gives the opposite result: the intra-cluster repulsions make the clusters spread out and touch other clusters at the boundary.
     # it's imporetant to play with the "kernel alpha" hyperparameter to see where and how easily the HD structures get torn appart by h-t-SNE.
     N, M, X, Y = get_blobs(n=300*1000)
