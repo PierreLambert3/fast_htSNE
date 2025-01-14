@@ -1,4 +1,4 @@
-all_the_cuda_code = """
+
 #include <stdint.h>
 #include <stdio.h>
 
@@ -30,6 +30,32 @@ __device__ __forceinline__ uint32_t random_uint32_t_xorshift32(uint32_t* rand_st
     *rand_state ^= *rand_state >> 17u;
     *rand_state ^= *rand_state << 5u;
     return *rand_state;
+}
+
+__device__ __forceinline__ float random_float(uint32_t* rand_state){
+    random_uint32_t_xorshift32(rand_state);
+    return ((float)rand_state[0]) / 4294967296.0f;
+}
+
+__device__ __forceinline__ uint32_t murmurhash3(uint32_t key) {
+    key ^= key >> 16;
+    key *= 0x85ebca6b;
+    key ^= key >> 13;
+    key *= 0xc2b2ae35;
+    key ^= key >> 16;
+    return key;
+}
+
+__device__ __forceinline__ void chaoticise_seed(uint32_t* seed){
+    seed[0] = murmurhash3(seed[0]);
+    random_uint32_t_xorshift32(seed);
+    seed[0] = murmurhash3(seed[0]);
+}
+
+__device__ __forceinline__ uint32_t generate_unique_seed(uint32_t global_seed, uint32_t tid){
+    uint32_t seed = global_seed + (tid + 1) * 0x9e3779b9;
+    chaoticise_seed(&seed);
+    return seed;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -815,7 +841,9 @@ __global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uin
     }
 }
 
-__global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_eps, uint32_t N, uint32_t Mhd, uint32_t Mld, float cauchy_alpha, uint32_t seed, float* grad_acc_global, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, uint32_t* knn_HD, float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
+__global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_eps, uint32_t N, uint32_t Mhd, uint32_t Mld, float cauchy_alpha,
+            uint32_t seed, float* grad_acc_global, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, uint32_t* knn_HD, 
+            float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t khd            = threadIdx.x;
@@ -1024,8 +1052,8 @@ __device__ __forceinline__ void set_Pasym_andGet_entropy(uint32_t k, float ivRad
     // ~~~~~~~ 1. compute sum of Pnoms  ~~~~~~~
     reduce1d_sum_float(arr_floats, KHD, k);
     float sumP = arr_floats[0];
-    if(sumP < 1e-19f){
-        sumP = 1e-19f;
+    if(sumP < 1e-24f){
+        sumP = 1e-24f;
     }
     arr_floats[k] = sq_dist * Pnom / sumP;
     reduce1d_sum_float(arr_floats, KHD, k);
@@ -1071,8 +1099,8 @@ __global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neigh
     __syncthreads();
     float Pasm_i_sum = smem_temp_float[0];
     float Pasm_j_sum = Pasym_sums[j];
-    Pasm_j_sum = fmaxf(Pasm_j_sum, 1e-16f);
-    Pasm_i_sum = fmaxf(Pasm_i_sum, 1e-16f);
+    Pasm_j_sum = fmaxf(Pasm_j_sum, 1e-24f);
+    Pasm_i_sum = fmaxf(Pasm_i_sum, 1e-24f);
     // ~~~~~~~~  symmetrized Pij  ~~~~~~~~
     float sij = Pasm[obs_i_global * KHD + k];
     float sji = __expf(-sq_dij * invRad_j);
@@ -1086,7 +1114,7 @@ __global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neigh
 }
 
 __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32_t* cuda_has_new_HD_neighs_acc, float* sqdists_HD_write,\
-                                float* invRadii_HD, float* Pasm, float* Pasym_sums, uint32_t seed){
+                                float* invRadii_HD, float* Pasm, float* Pasym_sums, uint32_t global_seed){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t k              = threadIdx.x;
@@ -1096,8 +1124,9 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     }
     bool is_main = (k == 0);
     extern __shared__ float _smem_radiiP[];
-    uint32_t seed_obs_i = seed + obs_i_global;
-    random_uint32_t_xorshift32(&seed_obs_i);
+    // uint32_t seed_obs_i = seed + obs_i_global;
+    // random_uint32_t_xorshift32(&seed_obs_i);
+    uint32_t seed_obs_i = generate_unique_seed(global_seed, obs_i_global);
 
     // ~~~~~~~~ check if the observation has new HD neighbours  ~~~~~~~~
     uint32_t* smem_temp_uint32_t = (uint32_t*) &_smem_radiiP[obs_i_in_block];
@@ -1125,7 +1154,7 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         target_perplexity = 1.5f;
     }
 
-    float perplexity_now = 0.0f;
+    // float perplexity_now = 0.0f;
     if(target_perplexity < 2.0f){
         target_perplexity = 2.0f;}
     float PP_tol = 0.01f*target_perplexity;
@@ -1187,8 +1216,8 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
                 ivRad   = L_ivRad + 0.4f * (R_ivRad - L_ivRad);
                 multiplier = multiplier * multiplier;
             }
-            if(L_ivRad < 1e-12f){
-                L_ivRad = 1e-12f;
+            if(L_ivRad < 1e-24f){
+                L_ivRad = 1e-24f;
                 ivRad = L_ivRad + 0.5f * (R_ivRad - L_ivRad);
                 
             }
@@ -1243,11 +1272,20 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
         Pasym_sums[obs_i_global] = sumPasm;
     }
 
-    set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
-    entropy = temp_floats[0];
-    perplexity_now = __expf(entropy);
-    
+    /* __syncthreads();
+    if(k == 0){
+        float sumPasm2 = 0.0f;
+        for(uint32_t k = 0; k < KHD; k++){
+            sumPasm2 += Pasm[obs_i_global * KHD + k];
+        }
+        printf("sumPasm: %f   %f \n", sumPasm, sumPasm2);
+    } */
 
+
+    /* set_Pasym_andGet_entropy(k, ivRad, smem_sqDists, temp_pijs, temp_floats);
+    entropy = temp_floats[0];
+    float perplexity_now = __expf(entropy); */
+   
     return;
 }
 
@@ -1514,7 +1552,7 @@ __global__ void candidates_HD_generate(uint32_t dist_type, uint32_t N, uint32_t 
 
     // filter candidates where cand_dist > neighdist_at_same_idx (the cand_R upper bound is not a strict guarantee for the candidate to be closer than its associated neighbour)
     if(cand_number < cand_R){
-        uint32_t cand_idx = cand_idxs[cand_number];
+        // uint32_t cand_idx = cand_idxs[cand_number];
         float cand_dist   = cand_dists[cand_number];
         float to_beat     = sqdists_HD_write[obs_i_global*KHD + cand_number];
         if(to_beat < cand_dist){
@@ -1679,7 +1717,7 @@ __global__ void candidates_LD_generate_and_sort(uint32_t N, uint32_t Mld, float*
     else{
         uint32_t r1     = random_uint32_t_xorshift32(&seed_local) % 1024;
         bool look_in_HD = (r1 < 1024 / 6);
-        const bool biased_Ks    = true;
+        // const bool biased_Ks    = true;
         const uint32_t maxDepth = 1u;
         uint32_t random_depth   = random_uint32_t_xorshift32(&seed_local) % 1024;
         uint32_t depth_todo     = 1u + ((random_depth * maxDepth) / 1024);
@@ -2341,23 +2379,19 @@ __global__ void kernel_scale_X(float* X_in, float* X_out, float min_val, float m
     uint32_t m              = threadIdx.x; 
     if (obs_i_global >= N || m >= M) { return; }
 
-    // scale the data:  and shift the data (y min = -1.0)
+    float span = max_val - min_val;
+    float exag = 0.26f * span;
+    min_val -= exag;
+    max_val += exag;
+
+    // scale the data and shift the data
     float value   = X_in[obs_i_global*M + m];
     float scaled  = (value - min_val) / (max_val - min_val);
-    scaled = ((scaled - 0.5f) * 2.0f) * 0.85f;
-    
+    scaled = ((scaled - 0.5f) * 2.0f);
 
-
-    // X_out[obs_i_global*M + m] = scaled ;
     X_out[obs_i_global*M + m] = scaled;
-
-
     return;
 }
-
-"""
-
-
 
 
 

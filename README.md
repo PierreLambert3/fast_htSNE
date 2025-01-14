@@ -1,1 +1,0 @@
-This package requires pyCUDA, which itself requires the cuda toolkit.

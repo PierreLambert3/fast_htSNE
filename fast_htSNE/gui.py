@@ -13,7 +13,7 @@ __AMBER_LIGHT__ = (255, 191, 0)
 __AMBER_DARK__  = (70, 35, 0)
 
 def gen_K_random_colours(K):
-    n = K * 200
+    n = K * 10
     dataset = np.random.uniform(0, 1, (n, 3))
     from sklearn.cluster import KMeans
     kmeans = KMeans(n_clusters=K, n_init=1, max_iter=25)
@@ -26,7 +26,7 @@ def determine_Y_colour(Y):
         return Y
 
     cpu_Y_colours = np.zeros((len(Y), 3), dtype=np.float32)
-    is_classification  = type(Y[0, 0]) == np.int32
+    is_classification  = type(Y[0, 0]) == np.uint32
     if is_classification:
         label_colours = gen_K_random_colours(len(np.unique(Y)))
         for i in range(len(Y)):
@@ -65,7 +65,7 @@ class HorizontalSlider:
         self.thin_rail = shapes.BorderedRectangle(self.x, self.y + 0.5*self.height - 2, self.width, 4, border=1, color=__AMBER_DARK__, border_color=__AMBER_LIGHT__)
         self.handle    = shapes.Rectangle(self.x + (self.value - self.min_val) / (self.max_val - self.min_val) * self.width, self.y, 6, self.height, color=__AMBER_DARK__)
         self.handle_highlight = shapes.BorderedRectangle(self.x + (self.value - self.min_val) / (self.max_val - self.min_val) * self.width, self.y, 6, self.height, border=1, color=(0,0,0), border_color=__AMBER_LIGHT__)
-        self.tiny_line = shapes.Line(2 + self.x + (self.value - self.min_val) / (self.max_val - self.min_val) * self.width, self.y + 0.3*self.height, 2 + self.x + (self.value - self.min_val) / (self.max_val - self.min_val) * self.width, self.y + 0.7*self.height, width=1, color=__AMBER_LIGHT__)
+        self.tiny_line = shapes.Line(2 + self.x + (self.value - self.min_val) / (self.max_val - self.min_val) * self.width, self.y + 0.3*self.height, 2 + self.x + (self.value - self.min_val) / (self.max_val - self.min_val) * self.width, self.y + 0.7*self.height, color=__AMBER_LIGHT__)
         self.label_value = pyglet.text.Label(str(self.value),x=self.x + self.width / 2, y=self.y + self.height / 3 - 30, anchor_x='center', anchor_y='center', color=__AMBER_LIGHT__, font_size=9)
         self.label_max = pyglet.text.Label(str(self.max_val), x=self.x + self.width + 7, y=self.y + self.height / 3, anchor_x='center', anchor_y='center', color=__AMBER_LIGHT__, font_size=9)
         self.label_min = pyglet.text.Label(str(self.min_val), x=self.x - 9, y=self.y + self.height / 3, anchor_x='center', anchor_y='center', color=__AMBER_LIGHT__, font_size=9)
@@ -128,7 +128,7 @@ class VerticalSlider:
         self.thin_rail = shapes.BorderedRectangle(self.x+0.5*self.width - 2, self.y, 4, self.height, border=1, color=__AMBER_DARK__, border_color=__AMBER_LIGHT__)
         self.handle    = shapes.Rectangle(self.x, self.y + (self.value - self.min_val) / (self.max_val - self.min_val) * self.height, self.width, 6, color=__AMBER_DARK__)
         self.handle_highlight = shapes.BorderedRectangle(self.x, self.y + (self.value - self.min_val) / (self.max_val - self.min_val) * self.height, self.width, 6, border=1, color=(0,0,0), border_color=__AMBER_LIGHT__)
-        self.tiny_line = shapes.Line(self.x + 0.3*self.width, 2 + self.y + (self.value - self.min_val) / (self.max_val - self.min_val) * self.height, self.x+ + 0.7*self.width, 2 + self.y + (self.value - self.min_val) / (self.max_val - self.min_val) * self.height, width=1, color=__AMBER_LIGHT__)
+        self.tiny_line = shapes.Line(self.x + 0.3*self.width, 2 + self.y + (self.value - self.min_val) / (self.max_val - self.min_val) * self.height, self.x+ + 0.7*self.width, 2 + self.y + (self.value - self.min_val) / (self.max_val - self.min_val) * self.height, color=__AMBER_LIGHT__)
         self.label_value = pyglet.text.Label(str(self.value), x=self.x + self.width + 8, y=2 + self.y + (self.value - self.min_val) / (self.max_val - self.min_val) * self.height, anchor_x='center', anchor_y='center', color=__AMBER_LIGHT__, font_size=9)
         self.label_max = pyglet.text.Label(str(self.max_val), x=self.x + self.width / 3, y=self.y + self.height + 7, anchor_x='center', anchor_y='center', color=__AMBER_LIGHT__, font_size=9)
         self.label_min = pyglet.text.Label(str(self.min_val), x=self.x + self.width / 3, y=self.y - 9, anchor_x='center', anchor_y='center', color=__AMBER_LIGHT__, font_size=9)
@@ -212,6 +212,7 @@ class ModernGLWindow(pyglet.window.Window):
         self.min_attraction_mul = min_attraction_mul
         self.max_attraction_mul = max_attraction_mul
 
+
         # -------   data for the GUI   -------
         self.N   = N
         self.Mld = Mld
@@ -281,7 +282,7 @@ class ModernGLWindow(pyglet.window.Window):
         self.slider_perplexity   = VerticalSlider(-0.9, 0.4, 0.05, 0.3, self.min_perplexity, 0.5*(self.max_perplexity+self.min_perplexity) , self.max_perplexity, self.perplexity.value, window_width, window_height, "Perplexity")
         self.slider_kernel_alpha = VerticalSlider(0.85, 0.4, 0.05, 0.3, self.min_kernel_alpha, 0.5*(self.max_kernel_alpha+self.min_kernel_alpha), self.max_kernel_alpha, self.kernel_alpha.value, window_width, window_height, "Kernel alpha")
         self.slider_attrac_mult  = VerticalSlider(0.85, -0.2, 0.05, 0.3, self.min_attraction_mul, 0.5*(self.max_attraction_mul+self.min_attraction_mul), self.max_attraction_mul, self.attrac_mult.value, window_width, window_height, "Attraction")
-        self.slider_LR           = HorizontalSlider(-0.8, 0.95, 1.6, 0.05, 0.01, 0.5*(100.0+0.01), 100.0, 1.0, window_width, window_height, "Learning rate")
+        self.slider_LR           = HorizontalSlider(-0.8, 0.95, 1.6, 0.05, 0.01, 0.5*(100.0+0.01), 100.0, 10.0, window_width, window_height, "Learning rate")
 
         # label containing the iteration number
         self.label_iteration = pyglet.text.Label(f"Iteration: {self.iteration.value}", x=window_width - 10, y=window_height - 10, anchor_x='right', anchor_y='top', color=__AMBER_DARK__, font_size=12)
@@ -291,7 +292,9 @@ class ModernGLWindow(pyglet.window.Window):
         self.slider_LR.update_relative(0.5)
         self.slider_perplexity.update_relative(0.5)
         self.slider_attrac_mult.update_relative(0.5)
-        
+
+        with self.points_rendering_finished.get_lock():
+            self.points_rendering_finished.value = True
 
     def setup_shaders(self):
         #TODO cool neon effects
@@ -316,7 +319,6 @@ class ModernGLWindow(pyglet.window.Window):
         return vertex_shader, fragment_shader
 
     def on_draw(self):
-
         # check self.force_new_vals
         with self.force_new_vals.get_lock():
             force_new_vals = self.force_new_vals.value
@@ -391,6 +393,11 @@ class ModernGLWindow(pyglet.window.Window):
             self.vbo_positions.write(self.Xld_longer.astype('f4').tobytes())
             
     def update(self, dt):
+        # a bit messy but we also use this variable to check if the main thread wants to close the window
+        with self.gui_closed.get_lock():
+            if self.gui_closed.value:
+                self.close()
+
         # only draw if the points were updated
         with self.points_ready_for_rendering.get_lock():
             points_ready = self.points_ready_for_rendering.value
