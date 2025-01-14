@@ -1,3 +1,7 @@
+Paper: https://www.esann.org/sites/default/files/proceedings/2024/ES2024-203.pdf
+"Estimated neighbour sets and smoothed sampled global interactions are sufficient for a fast approximate t-SNE." by Pierre Lambert, Edouard Couplet, Cyril de Bodt, and John A. Lee
+
+
 This requires pyCUDA, which itself should be able to compile CUDA code (ie: you need nvcc). Also you need a device which is CUDA capable such as a Nvidia GPU.
 Thankfuly, it is easy to install (at least on Windows), but you need to follow the instructions to make sure everything is setup correctly.
 Install the CUDA development toolkit before installing pycuda, check the installation of the cuda compiler with "nvcc --version"  before installing pycuda.
