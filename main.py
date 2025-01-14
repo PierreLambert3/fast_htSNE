@@ -144,7 +144,7 @@ def run_demo():
     # Notice how increasintg the "kernel alpha" (ie: decreasing the tails of the kernel in LR: getting closer to SNE than t-SNE) helps the points move around, same for the attraction multiplier.
     # it can often help to vary these  hyperparameters to get a feeling of how the points "want" to move around in the embedding space, and allowing them to move around, before settling to a final hyperparameter setting.
     N, M, X, Y = fetch_MNIST(atrificially_inflate_n_times=1)  # 60k points, 50 principal components
-    # N, M, X, Y = fetch_MNIST(atrificially_inflate_n_times=5)   # 5 * 600k points (noisy clones of the original dataset)
+    # N, M, X, Y = fetch_MNIST(atrificially_inflate_n_times=5)   # 5 * 60k points (noisy clones of the original dataset)
     Xld, _ = htSNE(n_components=2, verbose=True, with_gui=True).fit(X, Y)
 
     # 3. embedding to more than 2 dimensions: useless for visualisation, but can be a powerfull preprocessing step for a downstream task (supervised task with a loww number of variables, clustering, compression, ...)
