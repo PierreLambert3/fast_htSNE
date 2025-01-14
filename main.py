@@ -173,7 +173,8 @@ def run_demo():
     # the embedding is built slower, but the KNN sets are built faster (exit the gui with the escape key when satisfied)
     # printed in the terminal is a value that vaguely correlates with the KNN error: leaving the optimsiation around 0.02
     # gives fast and pretty good knns, waiiting for 0.00 gives really nice knn quality, for a bit more time to compute.
-    # clocking a couple of times on "reset" or "explosion" after the warmup period can help shake out the last drops of error.
+    # clicking a couple of times on "reset" or "explosion" after the warmup period can help shake out the last drops of error.
+    # don't change the distance metric! that would effectively reset the KNN sets in HD (but inpractice, i you go back to the deisred metric before the embedding changed stongly, the HD knn sets should quickly be found again because of the positive feedback between embedding quality and knn set finding)
     N, M, X, Y = fetch_MNIST(atrificially_inflate_n_times=1)
     Xld, knn_HD = htSNE(n_components=2, verbose=True, with_gui=True).fit(X, Y, purpose_is_KNN = True)
 
