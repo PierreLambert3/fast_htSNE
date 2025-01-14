@@ -1,0 +1,4 @@
+This requires pyCUDA, which itself should be able to compile CUDA code (ie: you need nvcc). Also you need a device which is CUDA capable such as a Nvidia GPU.
+Thankfully, it is easy to install (at least on Windows), but you need to follow the instructions to make sure everything is setup correctly.
+Install the CUDA development toolkit before instaling pycuda, check the installation of the cuda compiler with "nvcc --version"  before installing pycuda.
+Windows being Windows, you might need to download visual Studio (not VS code...) in order to have the binaries that will be used by nvcc, so, if on Windows, the order of install should be (Visual studio -> install the C/C++ things from there (easy to find in their interaface) -> then install the UCDA dev toolkit (https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/ and https://developer.nvidia.com/cuda-downloads)  -> then  check that nvcc in installed, then, install pyCUDA.
