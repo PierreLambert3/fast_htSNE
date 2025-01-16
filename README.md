@@ -21,7 +21,7 @@ Our method doesn't constrain the embedding space to low dimensionalities, and re
 
 II. Why interactivity is key in neighbour embeddings
 
-Let's take the example of the handwritte MNIST dataset.
+Let's take the example of the handwritte MNIST dataset. This dataset is 28x28 pixel images of handwritten digits from 0 to 9, written in white on a black background. One can ask: does this dataset have structures? If so, do some of these structures separate from the rest and form clusters? Do these structures appear at different scales? Since we all know what digits are, we might expect to see 10 clusters in the data, at least on a certain scale. tSNE and UMAP with their default hyperparameters do indeed tend to show 10 clusters, coloured here by their label to facilitate visualisation. However, wome people write "1" as a single straight line, some write this straight  CONTINUE HERE
 
 <img width="901" alt="image" src="https://github.com/user-attachments/assets/a3ee8346-dc3f-4e2e-bebc-43d03d103dc7" />
 
