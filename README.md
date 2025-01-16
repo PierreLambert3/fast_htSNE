@@ -23,6 +23,7 @@ II. Why interactivity is key in neighbour embeddings
 
 Let's take the example of the handwritte MNIST dataset.
 
+<img width="901" alt="image" src="https://github.com/user-attachments/assets/a3ee8346-dc3f-4e2e-bebc-43d03d103dc7" />
 
 
 
