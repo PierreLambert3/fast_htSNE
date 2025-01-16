@@ -1,4 +1,18 @@
+I. MOTIVATION:
 
+I.a. Neighbour embeddings
+
+Neighbour embeddings, such as t-SNE and UMAP, are powerfull tools to reduce the dimensionality of data nonlinearly, these algorithms are particularly good at mitigating the effects of concentration of norms, which tends to happen in high dimensions. The low-dimensional (LD) representation fo the high-dimensional (HD) data can be used for data visualisation if the target LD dimensionality is 2 or 3, or as a prepocessing step for further computations: a preprocessing with tSNE/UMAP can help denoise data and reduce the effects of the "curses of dimensionality" on downstream algorithms, for isntance for clsutering purposes.
+
+To keep things very short and intuitive, neighbour embeddings typically work in 2 phases: first, KNN sets in HD are determined for each points. Then, a LD representation of the points are moved around in the embedding in the aim to preserve the KNN sets computed in HD: if the neighbour sets in LD are similar to those in HD, one can say that the LD representation captures well the local structures in the data. The points in LD are subject to attractive and repulsive forces, intuitively, they are attracted to their neighbours in HD, and repulsed from the points that are close in LD but not in their neighbour sets in HD.
+
+I.b. The t-SNE family vs the UMAP family
+
+UMAP and t-SNE are some of the most commonly used neighbour embedding algorithms, they both have adavantages and shortcommings. 
+
+tSNE (and its ancestor SNE introduced by the nobel price G. Hinton in 2002), has the advantage of modelling quite precisely the local repulsive interactions between points, allowing greater precision in small scales (small neigbhourhoods), to achieive these precise local repulsive interactions, tSNE models the LD space, slowing the algorithm considerably. Accelerated t-SNE methods have been introduced, such as Barnes-Hut tSNE using partitionning trees and FFT-accelerated Interpolation-based t-SNE (FIt-SNE), while these accelerations render t-SNE applicable to large datasets (hundreds of thousands or millions of points), their effective speed is still inferior to alternatives that do not model the LD space (such as UMAP), and the modelling of the LD space restrict their use to very low dimensions for the embedding space, limiting their use to data visualisation.
+
+UMAP is a more recent algorithm that is also widely used in the data visualisation community. Contrary to t-SNE, it doesn't explicitely consider local repulsive forces between points in the embedding and only models global repulsions using random sampling of points across the dataset. This allows for very fast iterations and also removes the constraint on the dimensionality of the embedding space, opening the field of neighbour embeddings to other tasks than data visualisation. Claims have been done that UMAP better preserves the global structure of the data, but these are yet to be verified and I havent observed this property in the many embeddings I have done but both method families.
 
 
 
@@ -8,6 +22,7 @@
 
 
 INSTALLATION:
+
 Notable python packages required: pycuda, moderngl, pyglet
 
 Installing pycuda:
@@ -19,5 +34,6 @@ The CUDA compiler is quite easy to install on some Linux distributions too.
 
 
 PAPER:
+
 Paper: https://www.esann.org/sites/default/files/proceedings/2024/ES2024-203.pdf
 "Estimated neighbour sets and smoothed sampled global interactions are sufficient for a fast approximate t-SNE." by Pierre Lambert, Edouard Couplet, Cyril de Bodt, and John A. Lee
