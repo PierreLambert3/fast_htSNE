@@ -22,13 +22,11 @@ We recomend using this method with the built-in GUI.
 
 II. Why interactivity is key in neighbour embeddings
 
-Let's take the example of the handwritten MNIST dataset. This dataset is 28x28 pixel images of handwritten digits from 0 to 9, written in white on a black background. One can ask: does this dataset have structures? If so, do some substructures separate from the rest and form clusters? Do structures appear at different scales? Since we all know what digits are, we might expect to see 10 clusters in the data, at least on a certain scale. tSNE and UMAP with their default hyperparameters do indeed tend to show 10 clusters, coloured here by their label to facilitate visualisation.
-
-
-However, some people write "1" as a single straight line, some write this straight angled to the right, others add a small oblique line on the top.
-
-<img width="901" alt="image" src="https://github.com/user-attachments/assets/a3ee8346-dc3f-4e2e-bebc-43d03d103dc7" />
-
+Let's take the example of the handwritten MNIST dataset. This dataset is 28x28 pixel images of handwritten digits from 0 to 9, written in white on a black background. One can ask: does this dataset have structures? If so, do some substructures separate from the rest and form clusters? Do structures appear at different scales? Since we all know what digits are, we might expect to see 10 clusters in the data, at least on a certain scale. tSNE and UMAP with their default hyperparameters do indeed tend to show 10 clusters, here is a tSNE embedding using default hyperparameters, the observations are coloured here by their label to facilitate visualisation.
+<img width="307" alt="tsneparams_mnist" src="https://github.com/user-attachments/assets/0c206494-5e54-4e78-bd0b-f087d47440e1" />
+However, some people write "1" as a single straight line, some write this straight angled to the right, others add a small oblique line on the top. We cannot see these distinctions in the embedding presented above because the MNIST dataset, like most datasets, has an intrinsic dimensionality larger than 2 (around 6 for MNIST). This means that, whatever the dimensionality reduction method, it we embedd the dataset to only 2 and 3 dimensions, the original structure will not be perfectly preserved in the embedding. In this case, tSNE with its hyperparameter sets has "chosen" to preserve the part of the structure that clusters the same digits together: this conformation is the most stable one that the optimisation process found, and adding finer or coarser grained structures would have induced an unacceptable increase in the loss function being optimised. Changing the algorithm and some hyperparameters can drive the embedding towards other configurations, howing other structures in the data, as indicated in this figure taken from [1]:
+<img width="347" alt="heavyTailpaper_fig" src="https://github.com/user-attachments/assets/c5f8a3e9-b8e6-45cb-91a2-5a1958b67832" />
+In this figure, the LD similarity kernels have heavier tails than in classical tSNE, displacing the attraction-repulsion dynamics around each point and tearing the manifold in different places. Roughly, the points need to be more similar in HD to be together in this representation, and smaller dissimilarites will induce a tearing in the manifold. The authors performed a clustering in the embedding for each digit type, and computed the mean image in these clusters, the figure on the right shows these mean images for some of the digits. Thi indicates that using different tail-heaviness in the LD kernels can reveal finer (as here) or coarser (not shown here) grained structures.
 
 
 INSTALLATION:
@@ -42,6 +40,8 @@ Before installing pycuda, install the CUDA development toolkit. Check the instal
 Windows being Windows, you might need to download visual Studio (not VS code) in order to have the binaries that will be used by nvcc, so, if on Windows, the order of install should be (Visual studio -> install the C/C++ things from there (easy to find in their interface)) -> then install the CUDA dev toolkit (https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/ and https://developer.nvidia.com/cuda-downloads)  -> then  check that nvcc is installed, then, install pyCUDA (for isntance with pip).
 The CUDA compiler is quite easy to install on some Linux distributions too.
 
+References:
+[1] Kobak, D., Linderman, G., Steinerberger, S., Kluger, Y., Berens, P. (2020). Heavy-Tailed Kernels Reveal a Finer Cluster Structure in t-SNE Visualisations. In: Brefeld, U., Fromont, E., Hotho, A., Knobbe, A., Maathuis, M., Robardet, C. (eds) Machine Learning and Knowledge Discovery in Databases. ECML PKDD 2019. Lecture Notes in Computer Science(), vol 11906. Springer, Cham. https://doi.org/10.1007/978-3-030-46150-8_8
 
 PAPER:
 
