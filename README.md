@@ -39,6 +39,13 @@ Below are some MNIST digits embeddings using classical neighbour embedding techn
 
 <img width="1562" alt="together_others" src="https://github.com/user-attachments/assets/f112d5bc-34f7-4ce2-a6e0-e9a5af607d4e" />
 
+Now, here is a subset of possible configurations using the proposed method:
+
+<img width="1608" alt="together_others - Copy" src="https://github.com/user-attachments/assets/2cb37ece-c3dd-4eb3-ba46-ed4a0da58732" />
+
+Now, the method in action:
+
+
 
 INSTALLATION:
 
