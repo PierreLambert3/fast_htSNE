@@ -43,6 +43,10 @@ Now, here is a subset of possible configurations using the proposed method:
 
 <img width="1608" alt="together_others - Copy" src="https://github.com/user-attachments/assets/2cb37ece-c3dd-4eb3-ba46-ed4a0da58732" />
 
+On another dataset from the domain of a single-cell transcriptomics: the gene expressions are evaluated by looking at messenger RNA in cells found in rat brains. More details in [2]. We see that the global structures are more apparent using light LD kernel tails, and that smaller scale structures can be explored across multiple granularities using heavier tails.
+
+<img width="1251" alt="rna_high_attrac" src="https://github.com/user-attachments/assets/28731fb4-fdd0-4302-b5ba-7777e24ce301" />
+
 Now, the method in action:
 
 
@@ -60,6 +64,8 @@ The CUDA compiler is quite easy to install on some Linux distributions too.
 
 References:
 [1] Kobak, D., Linderman, G., Steinerberger, S., Kluger, Y., Berens, P. (2020). Heavy-Tailed Kernels Reveal a Finer Cluster Structure in t-SNE Visualisations. In: Brefeld, U., Fromont, E., Hotho, A., Knobbe, A., Maathuis, M., Robardet, C. (eds) Machine Learning and Knowledge Discovery in Databases. ECML PKDD 2019. Lecture Notes in Computer Science(), vol 11906. Springer, Cham. https://doi.org/10.1007/978-3-030-46150-8_8
+
+[2] Kobak D, Berens P. The art of using t-SNE for single-cell transcriptomics. Nat Commun. 2019 Nov 28;10(1):5416. doi: 10.1038/s41467-019-13056-x
 
 PAPER:
 
