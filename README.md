@@ -37,7 +37,7 @@ When using dimensionality reduction (DR) techniques on real datasets, we general
 The proposed method allows for seamless and fast transitions between many different embedding configurations, allowing a more rigorous visualisation of the data.
 Below are some MNIST digits embeddings using classical neighbour embedding techniques, the colours are not standardised across embeddings.
 
-<img width="1562" alt="together_others" src="https://github.com/user-attachments/assets/a6884072-512d-495c-a79a-490a0b7219f7" />
+<img width="1562" alt="together_others" src="https://github.com/user-attachments/assets/f112d5bc-34f7-4ce2-a6e0-e9a5af607d4e" />
 
 
 INSTALLATION:
