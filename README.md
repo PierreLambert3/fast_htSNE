@@ -1,3 +1,7 @@
+
+![croped2](https://github.com/user-attachments/assets/e4286f33-0dfe-415a-9212-6443ea794b81)
+
+
 I. MOTIVATION:
 
 I.a. Neighbour embeddings
@@ -48,6 +52,8 @@ On another dataset from the domain of a single-cell transcriptomics: the gene ex
 <img width="1251" alt="rna_high_attrac" src="https://github.com/user-attachments/assets/28731fb4-fdd0-4302-b5ba-7777e24ce301" />
 
 Now, the method in action:
+
+MNIST train set, 50 principal components (60k,50):
 
 
 
