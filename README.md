@@ -1,5 +1,7 @@
 
-![croped2](https://github.com/user-attachments/assets/e4286f33-0dfe-415a-9212-6443ea794b81)
+
+<img src="https://github.com/user-attachments/assets/e4286f33-0dfe-415a-9212-6443ea794b81" alt="croped2" width="300">
+
 
 
 I. MOTIVATION:
