@@ -65,9 +65,7 @@ Left: Coil-20 (these are rotating images: in the HD space, each object should la
 Right: Abalone (this dataset without preprocessing is particularily suited to show differences between Euclidean distances in HD and cosine distances):
 
 <img src="https://github.com/user-attachments/assets/d108d6e5-caaa-4eb2-bd8f-be1b6cfb7303" alt="croped2" width="400">
-<img src="https://github.com/user-attachments/assets/54205634-9c31-4ccf-b3d1-1d7675a6c65b" alt="croped2" width="400">
-
-
+<img src="https://github.com/user-attachments/assets/8a51d9dd-066b-42c7-bab2-3cc3a609f1bb" alt="croped2" width="400">
 
 INSTALLATION:
 
