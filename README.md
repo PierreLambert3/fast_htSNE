@@ -53,7 +53,20 @@ On another dataset from the domain of a single-cell transcriptomics: the gene ex
 
 Now, the method in action:
 
-MNIST train set, 50 principal components (60k,50):
+MNIST train set, 50 principal components (60k,50), from the first iteration (show that the KNN search is fast and quickly leads to a usable visualisation):
+
+![2025-01-2412-43-12-ezgif com-optimize](https://github.com/user-attachments/assets/65d083d0-dcef-4bf6-97ba-874c8e441513)
+
+Single cell RNAseq (a bit more thant 20k points, also the first 50 PC): see at the top of this file.
+
+Coil-20 (these are rotating images: in the HD space, each object should lay in a ring manifold)
+
+![github1-ezgif com-optimize](https://github.com/user-attachments/assets/d108d6e5-caaa-4eb2-bd8f-be1b6cfb7303)
+
+Abalone (this dataset without preprocessing is particularily suited to show differences between Euclidean distances in HD and cosine distances):
+
+![2025-01-2412-35-54-ezgif com-optimize](https://github.com/user-attachments/assets/54205634-9c31-4ccf-b3d1-1d7675a6c65b)
+
 
 
 
