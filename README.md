@@ -58,7 +58,9 @@ On another dataset from the domain of a single-cell transcriptomics: the gene ex
 
 <img width="1251" alt="rna_high_attrac" src="https://github.com/user-attachments/assets/28731fb4-fdd0-4302-b5ba-7777e24ce301" />
 
-Now, the method in action. All these gifs show the method running on a laptop with a modern GPU, therefore the GPU is throttled. To fit the size constraint of this markdown, every 3rd frame in the gifs is dropped, making them faster than the true speed, however the actual effective speed on the laptop is close to what is shown here. Additional compression was done, lowering the quality of the animated images.
+III. The method in action
+
+All these gifs show the method running on a laptop with a modern GPU, therefore the GPU is throttled. To fit the size constraint of this markdown, every 3rd frame in the gifs is dropped, making them faster than the true speed, however the actual effective speed on the laptop is close to what is shown here. Additional compression was done, lowering the quality of the animated images.
 
 Left: MNIST train set (60k points, 50 dimensions: we took the 50 principal components), from the first iteration of the algorithm. This shows that the KNN search is fast and quickly leads to a usable visualisation:
 Right : Single cell RNAseq (a bit more than 20k points, also the first 50 PC).
@@ -76,6 +78,8 @@ A quick demonstration of the algorithm at work with and embedding dimensionality
 
 ![2025-01-24-15-26-30-ezgif com-crop](https://github.com/user-attachments/assets/ba70b0e3-3070-4f8d-92cd-fe05b7c34a03)
 
+The method can also be applied to very large datasets, as here on embeddings of imagenet (1.2M observations). The data is taken from the latent space of large vision-language transformer models.
+
 
 INSTALLATION:
 
@@ -89,6 +93,7 @@ Windows being Windows, you might need to download Visual Studio (not VS code) in
 The CUDA compiler is quite easy to install on some Linux distributions too.
 
 References:
+
 [1] Kobak, D., Linderman, G., Steinerberger, S., Kluger, Y., Berens, P. (2020). Heavy-Tailed Kernels Reveal a Finer Cluster Structure in t-SNE Visualisations. In: Brefeld, U., Fromont, E., Hotho, A., Knobbe, A., Maathuis, M., Robardet, C. (eds) Machine Learning and Knowledge Discovery in Databases. ECML PKDD 2019. Lecture Notes in Computer Science(), vol 11906. Springer, Cham. https://doi.org/10.1007/978-3-030-46150-8_8
 
 [2] Kobak D, Berens P. The art of using t-SNE for single-cell transcriptomics. Nat Commun. 2019 Nov 28;10(1):5416. doi: 10.1038/s41467-019-13056-x
