@@ -78,7 +78,11 @@ A quick demonstration of the algorithm at work with and embedding dimensionality
 
 ![2025-01-24-15-26-30-ezgif com-crop](https://github.com/user-attachments/assets/ba70b0e3-3070-4f8d-92cd-fe05b7c34a03)
 
-The method can also be applied to very large datasets, as here on embeddings of imagenet (1.2M observations). The data is taken from the latent space of large vision-language transformer models.
+The method can also be applied to very large datasets, as here on embeddings of half of imagenet (a bit more than 600k observations). This method works with larger datasets (more than 1M points), but then the slowdown becomes important and the interactivity is diminished. On resonble machines, a couple of hundred of thousands of points stays reasonable in terms of interactivity. In the two following images, the data is taken from the latent space of large vision-language transformer models, the top row shows representations of the latent space of the EVA model, a very large neural network. The second row shows representations of a model called ViT B 16, a smaller model. In supervised tasks, the large model performs better, and we can see that the tSNE embeddings tend to show better class separation. Some zones have better class separation than others, in both models. It could eb interesting to explore the data further, to find why some zones get a better 2D representation than others: is it because of a locally larger intrinsic dimensionality in the latent space? Or perhaps the concepts are harder and the neural network didn't find an organised representation there? Perhaps these correspond to classes less frequent in pre training? The fast tSNE embeddings can be a usefull tool to explore these hypotheses, in conjunction with other tools. One might for instance colour the data points depending on their class error  in testiong, or depending on frequencies of concepts in pre training to help develop intuition. One could also filter out some points and only focus on part of the embedding.
+
+![big](https://github.com/user-attachments/assets/aaed0459-cd65-4629-be92-9e78e2d8fc2d)
+
+![Capture d’écran 2025-01-29 101849 - Copy](https://github.com/user-attachments/assets/9f7b4f30-1606-494e-affe-132b89b52e83)
 
 
 INSTALLATION:
