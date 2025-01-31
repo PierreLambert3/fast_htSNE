@@ -13,6 +13,8 @@ __CUDA_CODE__ = "no code"
 with open("fast_htSNE/kernels.cu", "r") as f:
     __CUDA_CODE__ = f.read()
 
+
+
 __DEVICE_NUMBER__ = 0 # the GPU device to use
 __MIN_PERPLEXITY__ = 1.5
 __MAX_KERNEL_ALPHA__ = 100.0
@@ -651,7 +653,7 @@ class htSNE:
 
     def launch_gui(self, optimisation_structures, Y, dont_launch=False):
         if self.verbose and not dont_launch:
-            print("\033[38;2;255;165;0m \nLaunching the GUI process... (windows warning might trigger, but that's fine, it's just being whiny OS) \033[0m", end='')
+            print("\033[38;2;255;165;0m \nLaunching the GUI process... (windows warning might trigger, but that's fine, it's just being whiny) \033[0m", end='')
 
         from .gui import gui_worker
         # 1. Initialise shared memory with GUI (on CPU)
@@ -762,16 +764,15 @@ class htSNE:
             self.streams.stream_neigh_HD.synchronize()
 
         return niter_since_recompute_P + 1
-
+    
     def compute_LD_simi_denominator(self, optimisation_structures):
         random_sum = optimisation_structures.randoms_sumSnorms_LD.get()
         neighs_sum = optimisation_structures.neighbours_sumSnorms_LD.get()
-        # n_samples_estim = self.N * (__Khd__ + __Kld__ + __N_INTERACTIONS_FAR__) 
-        n_samples_estim = self.N * (__Khd__ + __Khd__ + __N_INTERACTIONS_FAR__) 
-        matrix_area = self.N * (self.N - 1) #/ 2.0
-        scaling_factor = matrix_area / n_samples_estim
+        n_samples_estim = np.float32(self.N) * np.float32(__Khd__ + __Khd__ + __N_INTERACTIONS_FAR__)
+        matrix_area     = np.float32(self.N) * np.float32(self.N - 1) #/ 2.0
+        scaling_factor  = matrix_area / n_samples_estim
         return np.float32(scaling_factor * (random_sum + neighs_sum))
-    
+
     def optimise_with_gui(self, cpu_Xhd_preprocessed, optimisation_structures, limit_by_time, limit_by_niter, max_n_sec, max_n_iter, Y, with_warmup):
         # 1. Launch the GUI process
         cuda_Xld_temp_Xld, process_gui, cpu_shared_mem, cpu_Xld_arr_on_smem = self.launch_gui(optimisation_structures, Y)
@@ -850,7 +851,8 @@ class htSNE:
             # 10. Determine if we should refine the HD neighbourhoods this iteration
             EMA_pct_new_HD_neighs = 0.9 * EMA_pct_new_HD_neighs + 0.1 * float(optimisation_structures.HD_n_new_neighs_sum.get()) / float(self.N)
             do_HDnnDescent = self.should_we_refine_HD_neighbourhoods_this_iteration(self.purpose_is_KNN, iteration, EMA_pct_new_HD_neighs)
-            print(f"\r{np.round(EMA_pct_new_HD_neighs, 2)}  ", end=' ')
+            if self.verbose:
+                print(f"\r{np.round(EMA_pct_new_HD_neighs, 2)}  ", end=' ')
 
             # 11. One iteration proper
             self.one_iteration(iteration, warmup, warmup_ratio, do_HDnnDescent, cpu_Xhd_preprocessed, write_set, read_set, optimisation_structures, denominator_simi_LD)
