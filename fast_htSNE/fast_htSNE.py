@@ -769,7 +769,7 @@ class htSNE:
         random_sum = optimisation_structures.randoms_sumSnorms_LD.get()
         neighs_sum = optimisation_structures.neighbours_sumSnorms_LD.get()
         n_samples_estim = np.float32(self.N) * np.float32(__Khd__ + __Khd__ + __N_INTERACTIONS_FAR__)
-        matrix_area     = np.float32(self.N) * np.float32(self.N - 1) #/ 2.0
+        matrix_area     = np.float32(self.N) * np.float32(self.N - 1) / 2.0
         scaling_factor  = matrix_area / n_samples_estim
         return np.float32(scaling_factor * (random_sum + neighs_sum))
 
