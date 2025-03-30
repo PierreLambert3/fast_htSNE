@@ -1,3 +1,15 @@
+import multiprocessing
+if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn')
+    from multiprocessing import freeze_support
+    freeze_support()
+
+"""
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+THESE FIRST LINES ABOUT MULTIPROCESSING ARE NEEDED (at least on windows). Apparently Python's updates break previous codebases instead of trying to keep compatibilites like any reasonable programming language would.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"""
+
 import numpy as np
 
 DATA_ROOT = './datasets/'
