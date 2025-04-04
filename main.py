@@ -137,14 +137,9 @@ def run_demo():
     
     from fast_htSNE.fast_htSNE import htSNE
 
-    # 0. A tiny dataset to get a feeling of the algorithm: the training set of MNIST or COIL20. Notice the impact of the "kernel alpha" hyperparameter, be aware that a high "kernel alpha "means lower tails in the LD kernel (closer to SNE)
-    N, M, X, Y = get_coil20()
-    Xld, _ = htSNE(n_components=2, verbose=True, with_gui=True).fit(X, Y)
-
     # a small transcriptomics dataset with custom colours for the classes
     N, M, X, Y = get_RNAseq20k()
-    Xld, _ = htSNE(n_components=2, verbose=True, with_gui=True).fit(X, Y)
-
+    Xld, _ = htSNE(n_components=2, verbose=True, with_gui=True).fit(X, Y, purpose_is_KNN=True)
 
     # 1. watch how for some data distribultions/preprocessing types, changing the dist metric can have a large impact (try cosine).
     N, M, X, Y = get_satellite()

@@ -21,6 +21,7 @@ __global__ void get_constants(float* max_perplexity, uint32_t* khd, uint32_t* kl
     *n_interactions_far = N_INTERACTIONS_FAR;
 }
 
+
 // --------------------------------------------------------------------------------------------------
 // -----------  a terrible chaotic function that should never be used  ------------------------------
 // --------------------------------------------------------------------------------------------------
@@ -841,9 +842,20 @@ __global__ void kernel_uint32_tSumReduction_one_step(uint32_t* input_vector, uin
     }
 }
 
+__device__ inline bool link_already_counted(float* knn_dists, float* max_dists, uint32_t i, uint32_t j, uint32_t K){
+    if(i < j){
+        return false;
+    }
+    float distance    = knn_dists[i * K + j];
+    float j_max_dists = max_dists[j];
+    bool mutual       = distance < j_max_dists;
+    return mutual;  
+}
+
 __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_eps, uint32_t N, uint32_t Mhd, uint32_t Mld, float cauchy_alpha,
             uint32_t seed, float* grad_acc_global, double* sumSnorms_rand, double* sumSnorms_neighs, float* X_nest, uint32_t* knn_HD, 
-            float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD){
+            float* Psym, uint32_t* knn_LD, float repuls_multiplier, float denominatorLD,
+            float* neighdists_HD, float* neighdists_LD, float* maxdist_HD, float* maxdist_LD){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t khd            = threadIdx.x;
@@ -958,9 +970,10 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
     float Pij1 = Psym[obs_i_global * KHD + khd] * exag;
     float _A_1 = 0.0f, _A_2 = 0.0f, _B_1 = 0.0f, _B_2 = 0.0f;
     float grad_prefix_1 = 0.0f, grad_prefix_2 = 0.0f;
+    
     // ~~~~~~~~ 2.1 precompute i <--> j1/2 gradient prefix  ~~~~~~~~
     float attrac_multiplier = 1.0f - repuls_multiplier;
-    if(sq_eucl1 > LD_neigh_dist_threashold){
+    if(sq_eucl1 > LD_neigh_dist_threashold){        
         _A_1 = Pij1 * attrac_multiplier  - (qij1 * repuls_multiplier);
     }
     else{
@@ -968,13 +981,22 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
     }
     _B_1 = grad_eps + __powf(wij1,__frcp_rn(cauchy_alpha));
     grad_prefix_1 = 4.0f * _A_1 * _B_1;
+    if(link_already_counted(neighdists_HD, maxdist_HD, obs_i_global, j_1, KHD)){
+        grad_prefix_1 = 0.0f;
+    }
+
     if(has_other){
         _A_2 = (0.0f - (qij2 * repuls_multiplier));
         _B_2 = grad_eps + __powf(wij2, __frcp_rn(cauchy_alpha));
         grad_prefix_2 = 4.0f * _A_2 * _B_2;
+        
         if(!other_is_neigh){ // far sample: do as if there were (N-LKD) forces instead of nb of far samples
             float scaling_factor = (float) (N-KLD) / (float) N_INTERACTIONS_FAR;
             grad_prefix_2 *= scaling_factor;
+        }else{
+            if(link_already_counted(neighdists_LD, maxdist_LD, obs_i_global, j_2, KLD)){
+                grad_prefix_2 = 0.0f;
+            }
         }
     }
 
@@ -1114,7 +1136,7 @@ __global__ void kernel_radii_P_part2(uint32_t N, uint32_t* cuda_has_new_HD_neigh
 }
 
 __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32_t* cuda_has_new_HD_neighs_acc, float* sqdists_HD_write,\
-                                float* invRadii_HD, float* Pasm, float* Pasym_sums, uint32_t global_seed){
+                                float* invRadii_HD, float* Pasm, float* Pasym_sums, uint32_t* knn_HD, uint32_t global_seed, float* maxDists_HD){
     uint32_t obs_i_in_block = threadIdx.y;
     uint32_t n_obs_in_block = blockDim.y;
     uint32_t k              = threadIdx.x;
@@ -1262,7 +1284,21 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     // ~~~~~~~~  compute Pasym & sumPasm for obs i   ~~~~~~~~	
     float eucl_sq = smem_sqDists[k];
     float p_asm   = __expf(-eucl_sq * ivRad);
-    temp_floats[k] = p_asm;
+    Pasm[obs_i_global * KHD + k] = p_asm;
+    uint32_t j = knn_HD[obs_i_global * KHD + k];
+
+    if(!link_already_counted(sqdists_HD_write, maxDists_HD, obs_i_global, j, KHD)){
+        atomicAdd(&Pasym_sums[j], p_asm);
+        atomicAdd(&Pasym_sums[obs_i_global], p_asm);
+    }
+
+    
+
+    
+
+
+
+    /* temp_floats[k] = p_asm;
     reduce1d_sum_float(temp_floats, KHD, k);
     float sumPasm = temp_floats[0];
     
@@ -1270,7 +1306,9 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     Pasm[obs_i_global * KHD + k] = p_asm;
     if(is_main){
         Pasym_sums[obs_i_global] = sumPasm;
-    }
+    } */
+
+
 
     /* __syncthreads();
     if(k == 0){
@@ -1288,8 +1326,6 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
    
     return;
 }
-
-
 
 __global__ void kernel_flag_all_newNeighs(uint32_t N, uint32_t* cuda_has_new_HD_neighs, uint32_t* cuda_has_new_HD_neighs_acc){
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;

@@ -36,6 +36,8 @@ class _Kernels:
     def __init__(self, gpu_ctx, compiled, N, Mhd, Mld):
         self.compiled = compiled
 
+
+
         # compute_all_LD_sqdists Kernel 
         cuShape = Kernel_shapes_2dBlocks(N_threads_total=N * __Kld__, N_threads_block_x=__Kld__, smem_n_float32_per_thread=2,\
                                             cuda_device_attributes=gpu_ctx.get_device_attributes(), constant_additional_smem_n_float32=1, smem_n_float32_per_block_y=Mld)
@@ -170,6 +172,7 @@ class _Optimisation_structures:
         self.cu_sqdists_LD_B = gpu_ctx.malloc(np.zeros((N, __Kld__), dtype=np.float32))
         self.cu_far_dist_LD_A = gpu_ctx.malloc(np.ones(N, dtype=np.float32))
         self.cu_far_dist_LD_B = gpu_ctx.malloc(np.ones(N, dtype=np.float32))
+
         from .pycuda_utils import SumGpu, MinGpu, MaxGpu
         self.neighbours_sumSnorms_LD   = SumGpu(np.double, N, compiled_code, gpu_ctx.get_device_attributes())
         self.randoms_sumSnorms_LD      = SumGpu(np.double, N, compiled_code, gpu_ctx.get_device_attributes())
@@ -577,6 +580,7 @@ class htSNE:
         self.kernels.candidates_LD_generate_and_sort.async_launch(stream,\
             self.N, self.Mld, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, knn_HD_read, seed) 
 
+
     def fill_all_sqdists_HD(self, Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, stream):
         kernel = None
         if self.dist_metric == 0:
@@ -746,23 +750,23 @@ class htSNE:
         self.kernels.recompute_HD_farthest_distances.async_launch(stream,\
                     self.N, self.Mhd, global_seed, has_new_HD_neighs,  knn_HD_write, sqdists_HD_write, farthest_dist_HD_write)
 
-    def perhaps_recompute_P_matrix(self, write_set, optimisation_structures, force_recompute, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.02):
+    def perhaps_recompute_P_matrix(self, read_set, write_set, optimisation_structures, force_recompute, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.02):
         recompute_it = HD_config_changed or force_recompute
         if not recompute_it and niter_since_recompute_P > 25:
             recompute_it = r() < bias + ((0.2 * EMA_pct_new_HD_neighs)**2)
-        
         if recompute_it:
             write_knn_HD, write_sqdists_HD, _, _, _, _, _ = write_set
+            read_knn_HD,  read_sqdists_HD,  read_far_dist_HD,  read_Xld_true,  read_knn_LD,  read_sqdists_LD,  read_far_dist_LD  = read_set
             niter_since_recompute_P = -1
             seed = np.uint32(np.random.randint(low = 1, high = (__MAX_UINT32_T__//2)))
+            optimisation_structures.cu_Pasm_sums.fill(0.0)
             self.kernels.radii_P_part1.async_launch(self.streams.stream_neigh_HD,\
                     self.N, self.perplexity, optimisation_structures.cu_has_new_HD_neighs_acc, write_sqdists_HD,\
-                    optimisation_structures.cu_invRadii_HD, optimisation_structures.cu_Pasm, optimisation_structures.cu_Pasm_sums, seed)
+                    optimisation_structures.cu_invRadii_HD, optimisation_structures.cu_Pasm, optimisation_structures.cu_Pasm_sums, read_knn_HD, seed, read_far_dist_HD)
             self.kernels.radii_P_part2.async_launch(self.streams.stream_neigh_HD,\
                     self.N, optimisation_structures.cu_has_new_HD_neighs_acc, write_knn_HD, optimisation_structures.cu_Psym_knn,\
                     write_sqdists_HD, optimisation_structures.cu_invRadii_HD, optimisation_structures.cu_Psym, optimisation_structures.cu_Pasm, optimisation_structures.cu_Pasm_sums)
             self.streams.stream_neigh_HD.synchronize()
-
         return niter_since_recompute_P + 1
     
     def compute_LD_simi_denominator(self, optimisation_structures):
@@ -826,7 +830,7 @@ class htSNE:
             
             # 5. Possibly recompute the sparse P matrix (in HD). Do it if HD config changed, or if the gods of randomness will it. The probability increases with EMA_pct_new_HD_neighs with a positive bias of 0.02
             force_recompute_P       = (iteration < 400) and ((iteration % 25) == 0)
-            niter_since_recompute_P = self.perhaps_recompute_P_matrix(write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.02)
+            niter_since_recompute_P = self.perhaps_recompute_P_matrix(read_set, write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.02)
             
             # 6. Warmup particularities
             self.warmup_tweaks(optimisation_structures, warmup_ratio, iteration)
@@ -925,7 +929,7 @@ class htSNE:
             
             # 5. Possibly recompute the sparse P matrix (in HD). Do it if HD config changed, or if the gods of randomness will it. The probability increases with EMA_pct_new_HD_neighs with a positive bias of 0.02
             force_recompute_P       = (iteration < 400) and ((iteration % 25) == 0)
-            niter_since_recompute_P = self.perhaps_recompute_P_matrix(write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.02)
+            niter_since_recompute_P = self.perhaps_recompute_P_matrix(read_set, write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.02)
             
             # 6. Warmup particularities
             self.warmup_tweaks(optimisation_structures, warmup_ratio, iteration)
@@ -973,7 +977,7 @@ class htSNE:
         read_knn_HD,  read_sqdists_HD,  read_far_dist_HD,  read_Xld_true,  read_knn_LD,  read_sqdists_LD,  read_far_dist_LD  = read_set
         write_knn_HD, write_sqdists_HD, write_far_dist_HD, write_Xld_true, write_knn_LD, write_sqdists_LD, write_far_dist_LD = write_set
         cu_Xld_mmtm, cu_Xld_nest = optimisation_structures.cu_Xld_mmtm, optimisation_structures.cu_Xld_nest
-        
+
         lr = self.lr * self.lr_multiplier
 
         # 1. refine the neighbourhoods in LD, and update their similarities
@@ -991,9 +995,12 @@ class htSNE:
         global_seed = np.uint32(np.random.randint(low = 1, high = (__MAX_UINT32_T__//2)))
         repulsion_multiplier = np.float32(1.0 - self.attrac_mult) * self.repulsion_base
         self.kernels.compute_gradients.async_launch(self.streams.stream_grads, \
-                    np.float32(1.0), np.uint32(1), np.float32(1e-9), self.N, self.Mhd, self.Mld, self.kern_alpha, global_seed,\
+                    np.float32(1.0), np.uint32(1), np.float32(1e-12), self.N, self.Mhd, self.Mld, self.kern_alpha, global_seed,\
                     optimisation_structures.cu_grad_acc_global, optimisation_structures.randoms_sumSnorms_LD.lvl1_, optimisation_structures.neighbours_sumSnorms_LD.lvl1_,\
-                    cu_Xld_nest, optimisation_structures.cu_Psym_knn, optimisation_structures.cu_Psym, read_knn_LD, repulsion_multiplier, denominator_simi_LD)
+                    cu_Xld_nest, optimisation_structures.cu_Psym_knn, optimisation_structures.cu_Psym, read_knn_LD, repulsion_multiplier, denominator_simi_LD,\
+                    read_sqdists_HD, read_sqdists_LD, read_far_dist_HD, read_far_dist_LD)
+        #float* neighdists_HD, float* neighdists_LD, float* maxdist_HD, float* maxdist_LD
+        
         # 4 gradient accs to momenta, momenta to parameters
         self.kernels.receive_gradients.async_launch(self.streams.stream_grads, \
                     self.N, self.Mld, optimisation_structures.cu_grad_acc_global, write_Xld_true, cu_Xld_mmtm, lr)
