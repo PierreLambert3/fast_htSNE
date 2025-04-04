@@ -148,7 +148,7 @@ def run_demo():
     
     # 2. example usage for a reasonably large dataset (100k points or less): default hyperparameters
     # You will notice a first warmup period where hyperparameters are automatically changed across time. After that, feel free to change the hyperparameters in the GUI to see how the algorithm responds to different values.
-    # Notice how increasintg the "kernel alpha" (ie: decreasing the tails of the kernel in LR: getting closer to SNE than t-SNE) helps the points move around, same for the attraction multiplier.
+    # Notice how increasing the "kernel alpha" (ie: decreasing the tails of the kernel in LR: getting closer to SNE than t-SNE) helps the points move around, same for the attraction multiplier.
     # it can often help to vary these  hyperparameters to get a feeling of how the points "want" to move around in the embedding space, and allowing them to move around, before settling to a final hyperparameter setting.
     N, M, X, Y = fetch_MNIST(atrificially_inflate_n_times=1)  # 60k points, 50 principal components
     # N, M, X, Y = fetch_MNIST(atrificially_inflate_n_times=5)   # 5 * 60k points (noisy clones of the original dataset)

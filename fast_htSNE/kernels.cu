@@ -981,9 +981,9 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
     }
     _B_1 = grad_eps + __powf(wij1,__frcp_rn(cauchy_alpha));
     grad_prefix_1 = 4.0f * _A_1 * _B_1;
-    if(link_already_counted(neighdists_HD, maxdist_HD, obs_i_global, j_1, KHD)){
+    /* if(link_already_counted(neighdists_HD, maxdist_HD, obs_i_global, j_1, KHD)){
         grad_prefix_1 = 0.0f;
-    }
+    } */
 
     if(has_other){
         _A_2 = (0.0f - (qij2 * repuls_multiplier));
@@ -994,9 +994,9 @@ __global__ void kernel_gradients(float exag, uint32_t do_gradients, float grad_e
             float scaling_factor = (float) (N-KLD) / (float) N_INTERACTIONS_FAR;
             grad_prefix_2 *= scaling_factor;
         }else{
-            if(link_already_counted(neighdists_LD, maxdist_LD, obs_i_global, j_2, KLD)){
+            /* if(link_already_counted(neighdists_LD, maxdist_LD, obs_i_global, j_2, KLD)){
                 grad_prefix_2 = 0.0f;
-            }
+            } */
         }
     }
 
@@ -1284,29 +1284,15 @@ __global__ void kernel_radii_P_part1(uint32_t N, float target_perplexity, uint32
     // ~~~~~~~~  compute Pasym & sumPasm for obs i   ~~~~~~~~	
     float eucl_sq = smem_sqDists[k];
     float p_asm   = __expf(-eucl_sq * ivRad);
-    Pasm[obs_i_global * KHD + k] = p_asm;
-    uint32_t j = knn_HD[obs_i_global * KHD + k];
-
-    if(!link_already_counted(sqdists_HD_write, maxDists_HD, obs_i_global, j, KHD)){
-        atomicAdd(&Pasym_sums[j], p_asm);
-        atomicAdd(&Pasym_sums[obs_i_global], p_asm);
-    }
-
-    
-
-    
-
-
-
-    /* temp_floats[k] = p_asm;
+    temp_floats[k] = p_asm;
     reduce1d_sum_float(temp_floats, KHD, k);
-    float sumPasm = temp_floats[0];
     
     // ~~~~~~~~  save Pasym & sumPasm for obs i   ~~~~~~~~
     Pasm[obs_i_global * KHD + k] = p_asm;
     if(is_main){
+        float sumPasm = temp_floats[0];
         Pasym_sums[obs_i_global] = sumPasm;
-    } */
+    }
 
 
 
