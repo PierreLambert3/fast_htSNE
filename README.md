@@ -97,6 +97,77 @@ Before installing pycuda, install the CUDA development toolkit. Check the instal
 Windows being Windows, you might need to download Visual Studio (not VS code) in order to have the binaries that will be used by nvcc, so, if on Windows, the order of install should be (Visual studio -> install the C/C++ things from there (easy to find in their interface)) -> then install the CUDA dev toolkit (https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/ and https://developer.nvidia.com/cuda-downloads)  -> then  check that nvcc is installed, then, install pyCUDA (for isntance with pip).
 The CUDA compiler is quite easy to install on some Linux distributions too.
 
+
+Linux: 
+Here is a text dump that a colleague using Linux used to properly install everything, it's likely generated text:
+"
+To get PyCUDA and ModernGL working with CUDA 12.8 on Ubuntu 24.04, follow this complete setup process:
+
+1. Install NVIDIA Driver (with EGL and OpenGL support)
+Install driver version 535, which supports CUDA 12.8 and provides the necessary libraries:
+ 
+    sudo apt install nvidia-driver-535 libnvidia-gl-535 libglvnd-dev
+ 
+Note: The package libnvidia-egl-535 may not be available — that’s fine. The two above are sufficient.
+ 
+After installation, reboot:
+ 
+    sudo reboot
+ 
+2. Install CUDA 12.8 (Toolkit only)
+Download the `.run` (local) installer from the official NVIDIA CUDA Downloads page:
+ 
+    https://developer.nvidia.com/cuda-downloads
+ 
+Choose:
+- OS: Linux
+- Architecture: x86_64
+- Distribution: Ubuntu 22.04 (works fine on 24.04)
+- Installer Type: runfile (local)
+ 
+Then run the installer:
+ 
+    chmod +x cuda_12.8.*.run
+    sudo ./cuda_12.8.*.run --toolkit --override
+ 
+During the interactive setup:
+- Say NO to installing the driver
+- Say YES to installing the toolkit
+ 
+3. Set Environment Variables
+Add CUDA 12.8 to your PATH by editing your ~/.bashrc:
+ 
+    export PATH="/usr/local/cuda-12.8/bin:$PATH"
+    export LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH"
+ 
+Apply the changes:
+ 
+    source ~/.bashrc
+ 
+4. Install Python Libraries
+Using a Conda environment is recommended (e.g., Miniconda). Activate your environment:
+ 
+    conda activate myEnvironement
+ 
+Install the required packages:
+ 
+    pip install pycuda moderngl pyglet
+ 
+5. Verify Installation
+- Check CUDA version:
+ 
+    nvcc --version
+ 
+- Check NVIDIA driver:
+ 
+    nvidia-smi
+ 
+- Test PyCUDA:
+ 
+    python -c "import pycuda.driver as cuda; import pycuda.autoinit; print('CUDA Runtime Version:', cuda.get_version())"
+
+
+
 References:
 
 [1] Kobak, D., Linderman, G., Steinerberger, S., Kluger, Y., Berens, P. (2020). Heavy-Tailed Kernels Reveal a Finer Cluster Structure in t-SNE Visualisations. In: Brefeld, U., Fromont, E., Hotho, A., Knobbe, A., Maathuis, M., Robardet, C. (eds) Machine Learning and Knowledge Discovery in Databases. ECML PKDD 2019. Lecture Notes in Computer Science(), vol 11906. Springer, Cham. https://doi.org/10.1007/978-3-030-46150-8_8
