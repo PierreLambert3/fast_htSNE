@@ -90,7 +90,8 @@ INSTALLATION:
 
 Notable python packages required: pycuda, moderngl, pyglet
 
-Installing pycuda:
+General guidelines:
+
 Pycuda should be able to compile CUDA code (ie: you need nvcc). Also you need a device which is CUDA capable such as a Nvidia GPU.
 Thankfuly, it is easy to install (at least on Windows), but you need to follow the instructions to make sure everything is setup correctly.
 Before installing pycuda, install the CUDA development toolkit. Check the installation of the cuda compiler with "nvcc --version"  before installing pycuda.
@@ -98,7 +99,10 @@ Windows being Windows, you might need to download Visual Studio (not VS code) in
 The CUDA compiler is quite easy to install on some Linux distributions too.
 
 
+
 Linux: 
+
+
 Here is a text dump that a colleague using Linux used to properly install everything, it's likely generated text:
 "
 To get PyCUDA and ModernGL working with CUDA 12.8 on Ubuntu 24.04, follow this complete setup process:
