@@ -137,6 +137,10 @@ def run_demo():
     
     from fast_htSNE.fast_htSNE import htSNE
 
+    
+
+
+
     # a small transcriptomics dataset with custom colours for the classes
     N, M, X, Y = get_RNAseq20k()
     Xld, _ = htSNE(n_components=2, verbose=True, with_gui=True).fit(X, Y, purpose_is_KNN=True)

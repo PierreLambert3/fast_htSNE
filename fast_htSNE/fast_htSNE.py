@@ -13,8 +13,6 @@ __CUDA_CODE__ = "no code"
 with open("fast_htSNE/kernels.cu", "r") as f:
     __CUDA_CODE__ = f.read()
 
-
-
 __DEVICE_NUMBER__ = 0 # the GPU device to use
 __MIN_PERPLEXITY__ = 1.5
 __MAX_KERNEL_ALPHA__ = 100.0
@@ -118,7 +116,6 @@ class _Streams:
         self.generic_stream1.synchronize()
         self.generic_stream2.synchronize()
         self.generic_stream3.synchronize()
-
 
 """
 An ugly dump of allocated memory, mostly on the GPU
@@ -225,6 +222,9 @@ class htSNE:
         self.lr_multiplier = np.float32(10.0)
         self.dist_metric   = 0
         self.check_yourself_init()
+        self.last_frame_time = time.time()
+        self.frame_counter = 0
+        self.render_time_ema = 0.1
 
     """
     
@@ -580,7 +580,6 @@ class htSNE:
         self.kernels.candidates_LD_generate_and_sort.async_launch(stream,\
             self.N, self.Mld, Xld_read, knn_LD_read, knn_LD_write, sqdists_LD_write, farthest_dist_LD_write, knn_HD_read, seed) 
 
-
     def fill_all_sqdists_HD(self, Xhd, knn_HD_read, knn_HD_write, sqdists_HD_write, farthest_dist_HD_write, stream):
         kernel = None
         if self.dist_metric == 0:
@@ -699,10 +698,18 @@ class htSNE:
         def notify_GUI_that_data_is_ready():
             with self.smem_points_ready_for_rendering.get_lock():
                 self.smem_points_ready_for_rendering.value = True
+                self.last_frame_time = time.time()
+                self.frame_counter += 1
+        
         def is_GUI_done_rendering():
             gui_done = False
             with self.smem_points_rendering_finished.get_lock():
                 gui_done = self.smem_points_rendering_finished.value
+            if gui_done:
+                current_time = time.time()
+                frame_time = current_time - self.last_frame_time
+                alpha = 0.2
+                self.render_time_ema = (1-alpha) * self.render_time_ema + alpha * frame_time
             return gui_done
         
         # iteration sent to the GUI
@@ -723,7 +730,6 @@ class htSNE:
             stream_for_scaling.synchronize()
             notify_GUI_that_data_is_ready()
             return 0
-
         return gui_data_prep_phase
 
     def scaling_of_embedding_for_rendering(self, optimisation_structures, Xld_read, Xld_scaled, stream_for_scaling, read_Xld):
@@ -805,6 +811,7 @@ class htSNE:
         prev_iter_had_HD_config_change = True
         # 3. Determine warmup lengths based on limits
         warmup_length_iter, warmup_length_sec = self.detemine_warmup_lengths(limit_by_time, limit_by_niter, max_n_sec, max_n_iter)
+        # warmup_length_iter, warmup_length_sec = 10, 0 # DEVELOPMENT ONLY: REMOVE THIS AND UNCOMMENT THE LINE ABOVE
         
         # 4. finally, optimise
         while running:
@@ -884,7 +891,6 @@ class htSNE:
         if self.verbose:
             print("\033[38;2;255;165;0m \nfastSNE: optimisation finished. in ", iteration, " iterations and ", np.round(elapsed, 2), " seconds. \033[0m")
 
-         
     def optimise_soberly(self, cpu_Xhd_preprocessed, optimisation_structures, limit_by_time, limit_by_niter, max_n_sec, max_n_iter, Y, with_warmup):
         # 0. Fake launch of the GUI process (sets an,d allocates variables)
         cuda_Xld_temp_Xld, process_gui, cpu_shared_mem, cpu_Xld_arr_on_smem = self.launch_gui(optimisation_structures, Y, dont_launch=True)
@@ -904,6 +910,7 @@ class htSNE:
         prev_iter_had_HD_config_change = True
         # 3. Determine warmup lengths based on limits
         warmup_length_iter, warmup_length_sec = self.detemine_warmup_lengths(limit_by_time, limit_by_niter, max_n_sec, max_n_iter)
+        # warmup_length_iter = 10 # DEVELOPMENT ONLY: REMOVE THIS AND UNCOMMENT THE LINE ABOVE
         
         # 4. finally, optimise
         while running:

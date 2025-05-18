@@ -2,11 +2,16 @@
 import numpy as np
 import multiprocessing
 from multiprocessing import shared_memory
+import time
 
 # import modernGL (renderer) and pyglet (windowerer)
 import moderngl as mgl
 import pyglet
 from pyglet import shapes
+
+"""
+THIS FILE IS A BIG, STEAMY, PILE OF SPAGHETTI.
+"""
 
 __TARGET_FPS__  = 60.0
 __AMBER_LIGHT__ = (255, 191, 0)
@@ -212,6 +217,10 @@ class ModernGLWindow(pyglet.window.Window):
         self.min_attraction_mul = min_attraction_mul
         self.max_attraction_mul = max_attraction_mul
 
+        self.frame_in_progress = False
+        self.last_render_time  = time.time()
+        self.min_frame_time    = 1.0/32.0 # lets be modest with the frame rate
+        self.accumulated_time  = 0.0
 
         # -------   data for the GUI   -------
         self.N   = N
@@ -319,6 +328,26 @@ class ModernGLWindow(pyglet.window.Window):
         return vertex_shader, fragment_shader
 
     def on_draw(self):
+
+        # Block new frames if we're still processing a previous one
+        if self.frame_in_progress:
+            return
+        self.frame_in_progress = True
+
+        with self.points_rendering_finished.get_lock():
+            self.points_rendering_finished.value = False
+
+        # render the screen
+        self.ctx.clear()
+
+        # only draw when I want to
+        if self.redraw_now:
+            self.vao.render(mgl.POINTS)
+            self.redraw_now = False
+        
+        # clear to white
+        # self.ctx.clear(1.0, 1.0, 1.0)
+
         # check self.force_new_vals
         with self.force_new_vals.get_lock():
             force_new_vals = self.force_new_vals.value
@@ -332,16 +361,6 @@ class ModernGLWindow(pyglet.window.Window):
                 self.slider_kernel_alpha.value_change(np.round(ka_value, 2))
                 self.slider_attrac_mult.value_change(np.round(am_value, 2))
                 self.slider_LR.value_change(np.round(lr_value, 2))
-
-        # only draw when I want to
-        if not self.redraw_now:
-            return
-        self.redraw_now = False
-        
-        # render the screen
-        self.ctx.clear()
-        # clear to white
-        # self.ctx.clear(1.0, 1.0, 1.0)
         
         self.vao.render(mgl.POINTS)
 
@@ -357,6 +376,10 @@ class ModernGLWindow(pyglet.window.Window):
         self.slider_LR.draw()
 
         self.label_iteration.draw()
+
+        pyglet.gl.glFinish()
+        self.last_render_time = time.time()
+        self.frame_in_progress = False
 
         # notify the main process that the rendering is done
         with self.points_rendering_finished.get_lock():
@@ -393,6 +416,14 @@ class ModernGLWindow(pyglet.window.Window):
             self.vbo_positions.write(self.Xld_longer.astype('f4').tobytes())
             
     def update(self, dt):
+        time_now = time.time()
+        self.accumulated_time += time_now - self.last_render_time
+        if self.frame_in_progress:
+            return
+        if self.accumulated_time < self.min_frame_time:
+            return
+        self.accumulated_time = 0.0
+
         # a bit messy but we also use this variable to check if the main thread wants to close the window
         with self.gui_closed.get_lock():
             if self.gui_closed.value:
@@ -402,10 +433,12 @@ class ModernGLWindow(pyglet.window.Window):
         with self.points_ready_for_rendering.get_lock():
             points_ready = self.points_ready_for_rendering.value
             self.points_ready_for_rendering.value = False
-        if points_ready:
-            self.retrieve_and_prepare_data()
-            self.redraw_now = True
-            self.label_iteration.text = f"Iteration: {self.iteration.value}"
+            if points_ready:
+                self.retrieve_and_prepare_data()
+                self.redraw_now = True
+                self.label_iteration.text = f"Iteration: {self.iteration.value}"
+
+        # self.invalid = True
 
     def on_mouse_press(self, x, y, button, modifiers):
         if button == pyglet.window.mouse.LEFT:
