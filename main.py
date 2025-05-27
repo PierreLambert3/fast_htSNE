@@ -134,11 +134,7 @@ def get_RNAseq20k():
     return N, M, X.astype(np.float32), Y.astype(np.float32) / 256.0
 
 def run_demo():
-    
     from fast_htSNE.fast_htSNE import htSNE
-
-    
-
 
 
     # a small transcriptomics dataset with custom colours for the classes

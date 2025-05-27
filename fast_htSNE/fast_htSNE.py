@@ -232,7 +232,7 @@ class htSNE:
     To counter that, try setting base_attraction_repulsion_ratio to a alarge value, and also setting "attraction" in the gui to, for instance, 0.95.
     """
     def fit(self, Xhd_raw, Y=None, purpose_is_KNN=False, max_n_sec=None, max_n_iter=None, lr_strength=None, with_warmup=True,\
-                end_PP=None, end_kernel_alpha=None, end_attrac_mult=None, base_attraction_repulsion_ratio=1.0):
+                end_PP=None, end_kernel_alpha=None, end_attrac_mult=None, base_attraction_repulsion_ratio=1.0, warmup_n_iter=None):
         if end_PP is not None:
             self.end_PP = np.float32(end_PP)
         else:
@@ -250,6 +250,7 @@ class htSNE:
         self.perplexity  = np.float32(self.perplexity)
         self.kern_alpha  = np.float32(self.kern_alpha)
         self.attrac_mult = np.float32(self.attrac_mult)
+        self.user_set_warmup_n_iter = warmup_n_iter
 
         # 1. check if the algorithm is limited in time or in iterations or not at all
         limit_by_time, limit_by_niter, max_n_sec, max_n_iter = self.detemine_optimisation_termination_criterion(max_n_sec, max_n_iter)
@@ -705,6 +706,7 @@ class htSNE:
             gui_done = False
             with self.smem_points_rendering_finished.get_lock():
                 gui_done = self.smem_points_rendering_finished.value
+            gui_done = True # meh
             if gui_done:
                 current_time = time.time()
                 frame_time = current_time - self.last_frame_time
@@ -810,7 +812,10 @@ class htSNE:
         prev_iter_did_HD_knn_search    = True
         prev_iter_had_HD_config_change = True
         # 3. Determine warmup lengths based on limits
-        warmup_length_iter, warmup_length_sec = self.detemine_warmup_lengths(limit_by_time, limit_by_niter, max_n_sec, max_n_iter)
+        if not self.user_set_warmup_n_iter:
+            warmup_length_iter, warmup_length_sec = self.detemine_warmup_lengths(limit_by_time, limit_by_niter, max_n_sec, max_n_iter)
+        else:
+            warmup_length_iter, warmup_length_sec = self.user_set_warmup_n_iter, None
         # warmup_length_iter, warmup_length_sec = 10, 0 # DEVELOPMENT ONLY: REMOVE THIS AND UNCOMMENT THE LINE ABOVE
         
         # 4. finally, optimise
