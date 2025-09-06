@@ -1330,12 +1330,13 @@ __global__ void kernel_HD_redetermine_farthest_dists_and_sort(uint32_t N, uint32
         return;
     }
     extern __shared__ float smem_HD_distancesforfar[];
-    uint32_t* smem_temp_uint32_t = (uint32_t*) &smem_HD_distancesforfar[obs_i_in_block];
+    float* smem_temp_float = &smem_HD_distancesforfar[obs_i_in_block];
     if(k == 0){
-        smem_temp_uint32_t[0] = has_new_HD_neighs[obs_i_global];
+        smem_temp_float[0] = (float) has_new_HD_neighs[obs_i_global];
     }
     __syncthreads();
-    bool has_new_HD_neighs_obs_i = smem_temp_uint32_t[0] > 0u;
+    bool has_new_HD_neighs_obs_i = smem_temp_float[0] > 0.5f;
+    __syncthreads();
     uint32_t seed_here = seed_shared + obs_i_global;
     random_uint32_t_xorshift32(&seed_here);
     
