@@ -77,7 +77,7 @@ Right: Abalone, this dataset without preprocessing is particularily suited to sh
 <img src="https://github.com/user-attachments/assets/d108d6e5-caaa-4eb2-bd8f-be1b6cfb7303" alt="croped2" width="400">
 <img src="https://github.com/user-attachments/assets/8a51d9dd-066b-42c7-bab2-3cc3a609f1bb" alt="croped2" width="400">
 
-A quick demonstration of the algorithm at work with and embedding dimensionality of 6. This is not useful for visualisation, but the embedding can be used for a downstream machine learning task. The embeddings can be produced with the gui (on closing the windows, the embedding is returned, or you can click "save" to save to disk), or they can be produced without the gui, however, as hopefully demonstrated in the gifs above, we recomend exploring the data using the GUI.
+A quick demonstration of the algorithm at work with and embedding dimensionality of 6. This is not useful for visualisation, but the embedding can be used for a downstream machine learning task (more on this in the paper). The embeddings can be produced with the gui (on closing the windows, the embedding is returned, or you can click "save" to save to disk), or they can be produced without the gui, however, as hopefully demonstrated in the gifs above, we recomend exploring the data using the GUI.
 
 ![2025-01-24-15-26-30-ezgif com-crop](https://github.com/user-attachments/assets/ba70b0e3-3070-4f8d-92cd-fe05b7c34a03)
 
@@ -88,6 +88,15 @@ Some zones in the embeddings have better class separation than others, in both m
 ![big](https://github.com/user-attachments/assets/aaed0459-cd65-4629-be92-9e78e2d8fc2d)
 
 ![Capture d’écran 2025-01-29 101849 - Copy](https://github.com/user-attachments/assets/9f7b4f30-1606-494e-affe-132b89b52e83)
+
+
+As a bonu, to convince you to read the paper, here is a natural extension to the algorithm allowing unsupervised (hierarchical-) clustering of data:
+
+<img width="485" height="303" alt="Screenshot 2025-09-10 112434" src="https://github.com/user-attachments/assets/e703ea14-3cc2-4024-84be-b71a44475ad2" />
+
+<img width="505" height="468" alt="Screenshot 2025-09-10 112446" src="https://github.com/user-attachments/assets/1af5e32a-1027-4545-99b8-634e5d6d0a69" />
+
+
 
 INSTALLATION:
 
