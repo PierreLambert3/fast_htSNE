@@ -15,7 +15,7 @@ Neighbour embeddings, such as t-SNE and UMAP, are powerful tools to reduce the d
 
 To keep things very short and intuitive, neighbour embeddings typically work in two phases: first, KNN sets in HD are determined for each point. Then, an LD representation of the points is moved around in the embedding to preserve the KNN sets computed in HD. If the neighbour sets in LD are similar to those in HD, one can say that the LD representation captures the local structures in the data well. The points in LD are subject to attractive and repulsive forces. Intuitively, they are attracted to their neighbours in HD and repulsed from the points that are close in LD but not in their neighbour sets in HD. Kernel functions in both spaces are used as surrogates for KNN sets, mainly for differentiability. The kernel function in LD can have heavier tails than the one in HD to encourage the separation of clusters in the embedding, but this can also lead to artificial tearing of the manifold.
 
-I.b. The most common neighboru embedding algorithms: t-SNE and UMAP
+I.b. The most common neighbour embedding algorithms: t-SNE and UMAP
 
 UMAP and t-SNE are some of the most commonly used neighbour embedding algorithms; they both have advantages and shortcomings.
 
