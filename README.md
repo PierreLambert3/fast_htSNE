@@ -5,6 +5,8 @@
 Preprint available at:
 https://arxiv.org/abs/2509.07681#:~:text=9%20Sep%202025%5D-,FUnc%2DSNE%3A%20A%20flexible%2C%20Fast%2C%20and,Unconstrained%20algorithm%20for%20neighbour%20embeddings&text=Neighbour%20embeddings%20(NE)%20allow%20the,to%20handle%20very%20large%20datasets.
 
+Titled: "FUnc-SNE: A flexible, Fast, and Unconstrained algorithm for neighbour embeddings"
+
 I. MOTIVATION:
 
 I.a. Neighbour embeddings
