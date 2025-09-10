@@ -2,13 +2,16 @@
 
 <img src="https://github.com/user-attachments/assets/e4286f33-0dfe-415a-9212-6443ea794b81" alt="croped2" width="400">
 
+Preprint available at:
+https://arxiv.org/abs/2509.07681#:~:text=9%20Sep%202025%5D-,FUnc%2DSNE%3A%20A%20flexible%2C%20Fast%2C%20and,Unconstrained%20algorithm%20for%20neighbour%20embeddings&text=Neighbour%20embeddings%20(NE)%20allow%20the,to%20handle%20very%20large%20datasets.
+
 I. MOTIVATION:
 
 I.a. Neighbour embeddings
 
 Neighbour embeddings, such as t-SNE and UMAP, are powerful tools to reduce the dimensionality of data nonlinearly. These algorithms are particularly good at mitigating the effects of the concentration of norms, which tends to happen in high dimensions. The low-dimensional (LD) representation of the high-dimensional (HD) data can be used for data visualization if the target LD dimensionality is 2 or 3 or as a preprocessing step for further computations. Preprocessing with t-SNE/UMAP can help denoise data and reduce the effects of the "curse of dimensionality" on downstream algorithms, for instance, for clustering purposes.
 
-To keep things very short and intuitive, neighbour embeddings typically work in two phases: first, KNN sets in HD are determined for each point. Then, an LD representation of the points is moved around in the embedding to preserve the KNN sets computed in HD. If the neighbour sets in LD are similar to those in HD, one can say that the LD representation captures the local structures in the data well. The points in LD are subject to attractive and repulsive forces—intuitively, they are attracted to their neighbours in HD and repulsed from the points that are close in LD but not in their neighbour sets in HD. Kernel functions in both spaces are used as surrogates for KNN sets, mainly for differentiability. The kernel function in LD can have heavier tails than the one in HD to encourage the separation of clusters in the embedding, but this can also lead to artificial tearing of the manifold.
+To keep things very short and intuitive, neighbour embeddings typically work in two phases: first, KNN sets in HD are determined for each point. Then, an LD representation of the points is moved around in the embedding to preserve the KNN sets computed in HD. If the neighbour sets in LD are similar to those in HD, one can say that the LD representation captures the local structures in the data well. The points in LD are subject to attractive and repulsive forces. Intuitively, they are attracted to their neighbours in HD and repulsed from the points that are close in LD but not in their neighbour sets in HD. Kernel functions in both spaces are used as surrogates for KNN sets, mainly for differentiability. The kernel function in LD can have heavier tails than the one in HD to encourage the separation of clusters in the embedding, but this can also lead to artificial tearing of the manifold.
 
 I.b. The most common neighboru embedding algorithms: t-SNE and UMAP
 
@@ -16,7 +19,7 @@ UMAP and t-SNE are some of the most commonly used neighbour embedding algorithms
 
 t-SNE (and its ancestor SNE, introduced by the Nobel Prize winner G. Hinton in 2002) has the advantage of modeling local repulsive interactions between points quite precisely, allowing greater local precision. To achieve these precise local repulsive interactions, t-SNE computes the full KNN set in the LD space for its original verison, or models the LD space itself in most accelerated versions. The optimisation process is iterative, so computing the KNN set/modeling the LD space needs to be done at each iteration, slowing the algorithm considerably. The most common accelerated t-SNE methods are Barnes-Hut t-SNE, which uses partitioning trees, and FFT-accelerated Interpolation-based t-SNE (FIt-SNE). While these accelerations make t-SNE applicable to large datasets (hundreds of thousands or millions of points), their effective speed is still inferior to alternatives that do not model the LD space (such as UMAP). Additionally, the modeling of the LD space restricts its use to very low-dimensional embedding spaces, limiting its application to data visualization. Some versions of t-SNE allow for more flexibility in the choice of the kernel used in LD to define the neighbourhoods, shifting the dynamics of the forces at hand, which in term produces embeddings that preserve different structures in the data (an example is shown later).
 
-UMAP is a more recent algorithm that is also widely used in the data visualization community. Unlike t-SNE, it does not explicitly consider local repulsive forces between points in the embedding and only models global repulsions using random sampling of points across the dataset. This allows for very fast iterations and also removes the constraint on the dimensionality of the embedding space, opening the field of neighbour embeddings to applications beyond data visualization. Claims have been made that UMAP better preserves the global structure of the data, but these are yet to be verified and where sometimes the result of different initialisations of the embeddings (random vs PCA/Lagrangian eigenmap).
+UMAP is a more recent algorithm that is also widely used in the data visualization community. Unlike t-SNE, it does not accurately consider local repulsive forces between points in the embedding and only models global repulsions using random sampling of points across the dataset. This allows for very fast iterations and also removes the constraint on the dimensionality of the embedding space, opening the field of neighbour embeddings to applications beyond data visualization, there is however a heavy a cost in the quality of the preserved by the algorithm, as observed in the paper accompanying this method ("FUnc-SNE: A flexible, Fast, and Unconstrained algorithm for neighbour embeddings"), in [3], and in [4]. Claims have been made that UMAP better preserves the global structure of the data, but these are yet to be verified and where sometimes the result of different initialisations of the embeddings (random vs PCA/Laplacian eigenmap).
 
 I.c What this method brings
 
@@ -34,13 +37,11 @@ Since we all know what digits are, we might expect to see 10 clusters in the dat
 
 <img width="307" alt="tsneparams_mnist" src="https://github.com/user-attachments/assets/0c206494-5e54-4e78-bd0b-f087d47440e1" />
 
-However, some people write "1" as a single straight line, some write it angled to the right, and others add a small oblique line on the top. We cannot see these distinctions in the embedding presented above because the MNIST dataset, like most datasets, has an intrinsic dimensionality larger than 2 (around 6 for MNIST). This means that whatever dimensionality reduction method we use, if we embed the dataset into only 2 or 3 dimensions, the original structure will not be perfectly preserved in the embedding: the algorithm will render only part of the information contained in the dataset, and discard the rest. What is kept in the embeddings and what is discarded depends on the dataset, and on the method that models it (along with its hyperparameters). 
+However, some people write "1" as a single straight line, some write it angled to the right, and others add a small oblique line on the top. We cannot see these distinctions in the embedding presented above because the MNIST dataset, like most datasets, has an intrinsic dimensionality larger than 2 (around 6 for MNIST, if memory serves right). This means that whatever dimensionality reduction method we use, if we embed the dataset into only 2 or 3 dimensions, the original structures will not be perfectly preserved in the embedding: the algorithm will render only part of the information contained in the dataset, and discard the rest. What is kept in the embeddings and what is discarded depends on the dataset, and on the method that models it (along with its hyperparameters). 
 
-In this case, t-SNE, with its chosen hyperparameter set, has "decided" to preserve the part of the structure that clusters the same digits together. This configuration is the most stable one that the optimization process found, and adding finer- or coarser-grained structures to the embedding would have caused an unacceptable increase in the loss function being optimized. Changing the algorithm and some hyperparameters can drive the embedding toward other configurations, highlighting different structures in the data, as shown in this figure taken from [1]:
+In this case, t-SNE, with its chosen hyperparameter set, has "decided" to preserve the part of the structure that clusters the same digits together. This configuration is the most stable one that the optimization process found, and adding finer- or coarser-grained structures to the embedding would have caused an unacceptable increase in the loss function being optimized. Changing the algorithm and some hyperparameters can drive the embedding toward other configurations, highlighting different structures in the data, as shown in the following figure. A mode detailed explanation and analysis is performed in the paper. In short, the algorithm has separated clusters by tearing the manifold along zones of weakness, visualised here as a dip in the probability ditribution if projecting the HD data of two clusters along the direction that separate their centre of gravity. 
 
-<img width="347" alt="heavyTailpaper_fig" src="https://github.com/user-attachments/assets/c5f8a3e9-b8e6-45cb-91a2-5a1958b67832" />
-
-In this figure, the LD similarity kernels have heavier tails than in classical t-SNE, altering the attraction-repulsion dynamics on each point and tearing the manifold in different places. Roughly speaking, points need to be more similar in HD to remain together in this representation, while smaller dissimilarities will induce tearing in the manifold. The authors performed clustering in the embedding for each digit type and computed the mean image in these clusters. The figure on the right shows these mean images for some of the digits. This indicates that using different tail heaviness in the LD kernels can reveal finer (as shown here) or coarser (not shown here) grained structures.
+<img width="552" height="466" alt="Screenshot 2025-09-10 105701" src="https://github.com/user-attachments/assets/b31f3a01-534a-449e-9d33-0c4be89047b0" />
 
 When using dimensionality reduction (DR) techniques on real datasets, we generally want to explore the data, meaning we do not know precisely in advance what to look for. Using DR is therefore a delicate art where the user must not interpret what is shown as the unique true structure of the data but rather as one partly correct, yet potentially misleading, representation. This requires a careful balance between confirmation bias (filtering out irrelevant information) and the ability to question one's assumptions about the data to explore the dataset in a balanced manner.
 
@@ -178,7 +179,17 @@ References:
 
 [2] Kobak D, Berens P. The art of using t-SNE for single-cell transcriptomics. Nat Commun. 2019 Nov 28;10(1):5416. doi: 10.1038/s41467-019-13056-x
 
+[3] "Low-dimensional embeddings of high-dimensional data" at https://arxiv.org/abs/2508.15929
+
+[4] "SQuadMDS: A lean Stochastic Quartet MDS improving global structure preservation in neighbor embedding like t-SNE and UMAP" at https://www.sciencedirect.com/science/article/abs/pii/S0925231222008402
+
+
 PAPER:
 
-Paper: https://www.esann.org/sites/default/files/proceedings/2024/ES2024-203.pdf
+Intruductory paper: https://www.esann.org/sites/default/files/proceedings/2024/ES2024-203.pdf
 "Estimated neighbour sets and smoothed sampled global interactions are sufficient for a fast approximate t-SNE." by Pierre Lambert, Edouard Couplet, Cyril de Bodt, and John A. Lee
+
+More complete paper: https://arxiv.org/abs/2509.07681#:~:text=9%20Sep%202025%5D-,FUnc%2DSNE%3A%20A%20flexible%2C%20Fast%2C%20and,Unconstrained%20algorithm%20for%20neighbour%20embeddings&text=Neighbour%20embeddings%20(NE)%20allow%20the,to%20handle%20very%20large%20datasets.
+"FUnc-SNE: A flexible, Fast, and Unconstrained algorithm for neighbour embeddings" by Pierre Lambert, Edouard Couplet, Michel Verleysen, John Aldo Lee
+
+
