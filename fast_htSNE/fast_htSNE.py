@@ -778,12 +778,17 @@ class htSNE:
         return niter_since_recompute_P + 1
     
     def compute_LD_simi_denominator(self, optimisation_structures):
-        random_sum = optimisation_structures.randoms_sumSnorms_LD.get()
+        """ random_sum = optimisation_structures.randoms_sumSnorms_LD.get()
         neighs_sum = optimisation_structures.neighbours_sumSnorms_LD.get()
         n_samples_estim = np.float32(self.N) * np.float32(__Khd__ + __Khd__ + __N_INTERACTIONS_FAR__)
         matrix_area     = np.float32(self.N) * np.float32(self.N - 1) / 2.0
         scaling_factor  = matrix_area / n_samples_estim
-        return np.float32(scaling_factor * (random_sum + neighs_sum))
+        return np.float32(scaling_factor * (random_sum + neighs_sum)) """
+        random_sum = optimisation_structures.randoms_sumSnorms_LD.get()
+        n_samples_estim = np.float32(self.N) * np.float32(__N_INTERACTIONS_FAR__)
+        matrix_area     = np.float32(self.N) * np.float32(self.N - 1)
+        scaling_factor  = matrix_area / n_samples_estim
+        return np.float32(scaling_factor * random_sum)
 
     def optimise_with_gui(self, cpu_Xhd_preprocessed, optimisation_structures, limit_by_time, limit_by_niter, max_n_sec, max_n_iter, Y, with_warmup):
         # 1. Launch the GUI process

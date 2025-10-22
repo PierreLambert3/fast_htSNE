@@ -138,6 +138,7 @@ def run_demo():
 
 
     # a small transcriptomics dataset with custom colours for the classes
+    N, M, X, Y = get_coil20()
     N, M, X, Y = get_RNAseq20k()
     Xld, _ = htSNE(n_components=2, verbose=True, with_gui=True).fit(X, Y, purpose_is_KNN=True)
 
