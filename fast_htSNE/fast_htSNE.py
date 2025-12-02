@@ -597,7 +597,7 @@ class htSNE:
     def should_we_refine_HD_neighbourhoods_this_iteration(self, force_KNNsearch, iteration, ema_pct_new_HD_neighs):
         do_HDnnDescent = force_KNNsearch or (iteration < 100)
         if not do_HDnnDescent:
-            do_HDnnDescent = np.random.rand() < 0.05 + 2.0 * ema_pct_new_HD_neighs
+            do_HDnnDescent = np.random.rand() < 0.02 + 2.0 * ema_pct_new_HD_neighs
         return do_HDnnDescent
 
     def warmup_tweaks(self, optimisation_structures, warmup_ratio, iteration):
@@ -903,6 +903,14 @@ class htSNE:
         # 0. Fake launch of the GUI process (sets an,d allocates variables)
         cuda_Xld_temp_Xld, process_gui, cpu_shared_mem, cpu_Xld_arr_on_smem = self.launch_gui(optimisation_structures, Y, dont_launch=True)
         
+        if self.end_attrac_mult is not None:
+            self.smem_attrac_mult.value  = self.end_attrac_mult
+        if self.end_kernel_alpha is not None:
+            self.smem_kernel_alpha.value = self.end_kernel_alpha
+        if self.end_PP is not None:
+            self.smem_perplexity.value   = self.end_PP
+        self.smem_force_new_vals.value = True
+
         # 1. init some local variables
         denominator_simi_LD     = np.float32(self.N * __Kld__ * 0.2)
         running                 = True
@@ -918,8 +926,13 @@ class htSNE:
         prev_iter_had_HD_config_change = True
         # 3. Determine warmup lengths based on limits
         warmup_length_iter, warmup_length_sec = self.detemine_warmup_lengths(limit_by_time, limit_by_niter, max_n_sec, max_n_iter)
-        # warmup_length_iter = 10 # DEVELOPMENT ONLY: REMOVE THIS AND UNCOMMENT THE LINE ABOVE
         
+        if warmup_length_iter > 300: 
+            warmup_length_iter = 300
+
+
+        
+
         # 4. finally, optimise
         while running:
             # 1. Fetch the read/write structures for this phase
@@ -928,40 +941,22 @@ class htSNE:
             write_knn_HD, write_sqdists_HD, write_far_dist_HD, write_Xld_true, write_knn_LD, write_sqdists_LD, write_far_dist_LD = write_set
             cu_Xld_mmtm = optimisation_structures.cu_Xld_mmtm
             
-            # 2. Update hyperparameters / action request from the GUI
-            HD_config_changed, explosion_request, save_request, reset_request = self.receive_GUI_messages()
-            
             # 3. Sync all streams (sync in time at each iteration = costly but necessary constraint)
             self.streams.sync_all() # streams: neigh_HD, neigh_LD, minMax, grads
             
-            # 4. Save embedding / explosion / reset
-            if save_request:
-                self.save_embedding(read_Xld_true, Y)
-            if reset_request:
-                self.reset_embedding(cpu_Xhd_preprocessed, read_Xld_true, write_Xld_true, cu_Xld_mmtm, self.streams.stream_grads)
-            if explosion_request: # well technically it's an implosion
-                self.implosion(read_Xld_true, write_Xld_true, cu_Xld_mmtm, self.streams.stream_grads)
-            
             # 5. Possibly recompute the sparse P matrix (in HD). Do it if HD config changed, or if the gods of randomness will it. The probability increases with EMA_pct_new_HD_neighs with a positive bias of 0.02
-            force_recompute_P       = (iteration < 400) and ((iteration % 25) == 0)
-            niter_since_recompute_P = self.perhaps_recompute_P_matrix(read_set, write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.02)
+            force_recompute_P       = False
+            niter_since_recompute_P = self.perhaps_recompute_P_matrix(read_set, write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.001)
             
             # 6. Warmup particularities
             self.warmup_tweaks(optimisation_structures, warmup_ratio, iteration)
 
             # 7. Re-sync the HD knn at each iteration, else some HD discovery works would be lost. ("write" now were old "read" and vice versa)
-            if prev_iter_did_HD_knn_search or prev_iter_had_HD_config_change:
+            if prev_iter_did_HD_knn_search:
                 self.gpu_context.copy_gpu2gpu_async(dest_gpuarray=write_knn_HD,      src_gpuarray=read_knn_HD,      stream=self.streams.generic_stream1)
                 self.gpu_context.copy_gpu2gpu_async(dest_gpuarray=write_sqdists_HD,  src_gpuarray=read_sqdists_HD,  stream=self.streams.generic_stream2)
                 self.gpu_context.copy_gpu2gpu_async(dest_gpuarray=write_far_dist_HD, src_gpuarray=read_far_dist_HD, stream=self.streams.generic_stream3)
             self.streams.generic_stream1.synchronize(); self.streams.generic_stream2.synchronize(); self.streams.generic_stream3.synchronize()
-
-            # 8. Recompute all neigh dists on HD hparam change
-            if (HD_config_changed) or ((iteration%990) == 0):
-                self.fill_all_sqdists_HD(optimisation_structures.cu_Xhd, read_knn_HD,  write_knn_HD, write_sqdists_HD, write_far_dist_HD, self.streams.stream_neigh_HD)
-                self.fill_all_sqdists_HD(optimisation_structures.cu_Xhd, write_knn_HD, read_knn_HD,  read_sqdists_HD,  read_far_dist_HD, self.streams.stream_neigh_HD)
-                self.flag_all_points_as_having_new_neighbours(optimisation_structures, self.streams.stream_neigh_HD)
-                self.streams.stream_neigh_HD.synchronize()
 
             # 9. Get the sums of for LD simi denominator
             denominator_simi_LD = self.compute_LD_simi_denominator(optimisation_structures)
@@ -978,13 +973,12 @@ class htSNE:
             iteration += 1
             elapsed    = time.time() - start_t
             prev_iter_did_HD_knn_search    = do_HDnnDescent
-            prev_iter_had_HD_config_change = HD_config_changed
             # 13.1 Update running condition
             with self.smem_gui_closed.get_lock():
                 running = self.is_running(running, limit_by_time, limit_by_niter, iteration, elapsed, max_n_sec, max_n_iter)
             # 13.2 Manage warmup
             warmup, warmup_ratio = self.is_warmup(with_warmup, warmup, warmup_length_iter, warmup_length_sec, iteration, elapsed, optimisation_structures)
-        
+
         if self.verbose:
             print("\033[38;2;255;165;0m \nfastSNE: optimisation finished. in ", iteration, " iterations and ", np.round(elapsed, 2), " seconds. \033[0m")
 
@@ -1023,4 +1017,5 @@ class htSNE:
         optimisation_structures.randoms_sumSnorms_LD.async_reduce(stream=self.streams.stream_grads)
         optimisation_structures.neighbours_sumSnorms_LD.async_reduce(stream=self.streams.stream_grads)
             
+
 
