@@ -946,7 +946,7 @@ class htSNE:
             
             # 5. Possibly recompute the sparse P matrix (in HD). Do it if HD config changed, or if the gods of randomness will it. The probability increases with EMA_pct_new_HD_neighs with a positive bias of 0.02
             force_recompute_P       = False
-            niter_since_recompute_P = self.perhaps_recompute_P_matrix(read_set, write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, HD_config_changed, EMA_pct_new_HD_neighs, bias = 0.001)
+            niter_since_recompute_P = self.perhaps_recompute_P_matrix(read_set, write_set, optimisation_structures, force_recompute_P, niter_since_recompute_P, False, EMA_pct_new_HD_neighs, bias = 0.001)
             
             # 6. Warmup particularities
             self.warmup_tweaks(optimisation_structures, warmup_ratio, iteration)
@@ -1017,5 +1017,6 @@ class htSNE:
         optimisation_structures.randoms_sumSnorms_LD.async_reduce(stream=self.streams.stream_grads)
         optimisation_structures.neighbours_sumSnorms_LD.async_reduce(stream=self.streams.stream_grads)
             
+
 
 
