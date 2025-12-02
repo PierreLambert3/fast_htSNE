@@ -644,8 +644,6 @@ class htSNE:
             self.smem_kernel_alpha.value = self.end_kernel_alpha
         with self.smem_perplexity.get_lock():
             self.smem_perplexity.value = self.end_PP
-        with self.smem_LR_shared.get_lock():
-            self.smem_LR_shared.value = 10.0
         with self.smem_force_new_vals.get_lock():
             self.smem_force_new_vals.value = True
         with self.smem_explosion_please.get_lock():
@@ -1025,3 +1023,4 @@ class htSNE:
         optimisation_structures.randoms_sumSnorms_LD.async_reduce(stream=self.streams.stream_grads)
         optimisation_structures.neighbours_sumSnorms_LD.async_reduce(stream=self.streams.stream_grads)
             
+
